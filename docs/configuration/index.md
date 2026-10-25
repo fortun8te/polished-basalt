@@ -202,6 +202,7 @@ plain decoding would give.
 | `conversation-cache-mib` | engine | integer MiB | 0 (off) | RAM budget for parked conversations, so separate chats can come back without re-reading. |
 | `conversation-cache-slots` | engine | integer | 4 | At most this many parked conversations. |
 | `conversation-cache-min-free-mib` | engine | integer MiB | 2560 | Physical RAM floor kept free when parking a conversation. |
+| `conversation-cache-min-tokens` | engine | integer | 0 (park every one) | Park only conversations of at least this many tokens, so short one-shot requests leave the slots for conversations that come back. |
 
 ## Vision
 
