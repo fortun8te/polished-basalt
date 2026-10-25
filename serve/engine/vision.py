@@ -31,6 +31,7 @@ VISION_ENCODE_S = 300.0
 VISION_CACHE_BYTES = 1 << 30                    # room for about 64 images
 IMAGE_MAX_PIXELS = 64 << 20                     # matches the decoder's kMaxImagePixels
 IMAGE_MAX_BYTES = 32 << 20                      # one image's bytes, from any source
+IMAGE_MAX_PIXELS = 64 << 20                     # matches the decoder's kMaxImagePixels
 
 
 @dataclass(frozen=True)
