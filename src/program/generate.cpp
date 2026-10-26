@@ -10685,11 +10685,6 @@ int main(int argc, char** argv) {
             if (apply_thr.joinable()) apply_thr.join();
             if (copy_live) src.commit_exchanges();   // swaps applied early: the rest of their copies
             copy_live = false;
-            if (!xq_drain()) {   // no swap stays in flight between requests
-                std::printf("ERR an adaptive refill failed\n");
-                return 1;
-            }
-            xq_saturated = false;   // the next request starts at the base cap
             if (ppl != nullptr && !ppl->finish(err)) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
@@ -10895,6 +10890,12 @@ int main(int argc, char** argv) {
                 if (admitted_slot >= 0) std::printf("BADM %d %d\n", admitted_slot, admission_status);
             }
             std::fflush(stdout);
+            // no swap stays in flight between requests: the last round's copies land once the reply is out
+            if (!xq_drain()) {
+                std::printf("ERR an adaptive refill failed\n");
+                return 1;
+            }
+            xq_saturated = false;   // the next request starts at the base cap
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             // "12288 of 98179" when cancelled mid-read, the rate from what was read
             char read_txt[64];
