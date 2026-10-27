@@ -1,8 +1,11 @@
 // src/vision/preprocess.cpp - see basalt/vision/preprocess.hpp.
 #include "basalt/vision/preprocess.hpp"
 
+#include "basalt/platform/file.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 
@@ -15,6 +18,24 @@
 #include "stb_image.h"
 
 namespace basalt::vision {
+
+bool read_image_file(const std::string& path, std::vector<uint8_t>& out, std::string& err, size_t max_bytes) {
+    out.clear();
+    uint64_t size = 0;
+    if (!platform::file_size(path, size)) { err = "cannot open " + path; return false; }
+    if (size == 0) { err = "empty image"; return false; }
+    if (size > max_bytes) {
+        err = "the image file is " + std::to_string(size) + " bytes; the limit is " + std::to_string(max_bytes);
+        return false;
+    }
+    std::FILE* f = platform::open_file_utf8(path, "rb");
+    if (f == nullptr) { err = "cannot open " + path; return false; }
+    out.resize((size_t) size);
+    const size_t got = std::fread(out.data(), 1, out.size(), f);
+    std::fclose(f);
+    if (got != out.size()) { out.clear(); err = "cannot read " + path; return false; }
+    return true;
+}
 
 bool decode_image(const uint8_t* data, size_t len, Image& out, std::string& err, int64_t max_pixels) {
     if (data == nullptr || len == 0) { err = "empty image"; return false; }
