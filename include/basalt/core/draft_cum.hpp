@@ -12,6 +12,7 @@
 #include "basalt/platform/system.hpp"
 
 #include <cmath>
+#include <cstdint>
 
 #if defined(__CUDACC__)
 #define DRAFT_CUM_HD __host__ __device__
@@ -50,20 +51,61 @@ inline float draft_cum_scale() {
 }
 inline float draft_cum_base() { return kDraftCumBase0 * draft_cum_scale(); }
 
+/// The CPU expert misses of recent verify windows against this request's own history, by window size.  Every extra
+/// verified token adds experts the CPU must read, so when windows of a given size are missing more than they used to,
+/// extra tokens cost more and the threshold should rise; when they miss less (the VRAM tier has warmed to the
+/// request), it can fall.  Each size is compared with itself, so a change in which sizes get chosen does not move it.
+struct MissTrend {
+    static constexpr int kSizes = 16;
+    static constexpr int kWarm = 16;        ///< windows of one size before its trend counts
+    double fast[kSizes + 1] = {}, slow[kSizes + 1] = {};
+    int n[kSizes + 1] = {};
+    float scale = 1.0f;                     ///< the factor on the threshold
+
+    /// One verified window of `t` tokens in which the CPU computed `per_layer` distinct experts per layer.
+    void observe(int t, double per_layer) {
+        constexpr double kFast = 0.1, kSlow = 0.01;
+        constexpr float kLoScale = 0.85f, kHiScale = 1.2f;
+        t = t < 1 ? 1 : t > kSizes ? kSizes : t;
+        if (n[t] == 0) fast[t] = slow[t] = per_layer;
+        fast[t] += kFast * (per_layer - fast[t]);
+        slow[t] += kSlow * (per_layer - slow[t]);
+        ++n[t];
+        double lr = 0.0, w = 0.0;
+        for (int u = 1; u <= kSizes; ++u) {
+            if (n[u] < kWarm || slow[u] < 1e-6 || fast[u] < 1e-6) continue;
+            const double wu = n[u] < 32 ? (double) n[u] : 32.0;
+            lr += wu * std::log(fast[u] / slow[u]);
+            w += wu;
+        }
+        if (w <= 0.0) return;
+        const float r = (float) std::exp(0.5 * lr / w);   // the square root of the geometric mean ratio
+        scale = r < kLoScale ? kLoScale : r > kHiScale ? kHiScale : r;
+    }
+};
+
 /// Per-request threshold.  The threshold falls from the base toward kLo as the
 /// request's drafts are accepted more often than the bin table predicts: when they run well, longer windows pay.  They
 /// rise from the base toward kHi times the base when drafts are accepted less often than it predicts: when they run
 /// badly, the extra verified tokens cost more than they return.  The observed and expected accepted counts decay per
 /// window; the ratio sets the threshold along a piecewise-linear ramp.  A window with no draft offered carries no
-/// evidence and moves the ratio back to the one that gives the base, so a raised threshold cannot hold itself up.  The window's value is
-/// fixed before its drafts are made and shared by the host rule and the device graph.
+/// evidence and moves the ratio back to the one that gives the base, so a raised threshold cannot hold itself up.
+/// The window's value is fixed before its drafts are made and shared by the host rule and the device graph.
 struct DraftCumAdapt {
     float base = draft_cum_base();   ///< the threshold while nothing is known
     bool ramp = platform::fork_switch("THRESH_RAMP");   ///< the threshold may rise above the base; false: it only falls
+    bool miss_aware = platform::fork_opt_in("MISS_THRESH");   ///< recent CPU expert misses scale the threshold
     double obs = 0.0, exp = 0.0;
     float cur = base;
+    MissTrend trend;
 
-    float th() const { return cur; }
+    float th() const { return cur * trend.scale; }
+
+    /// One verified window of `t` tokens in which the CPU computed `misses` distinct (layer, expert) pairs over
+    /// `layers` layers.  Not for windows that read prompt tokens.
+    void note_misses(int t, int64_t misses, int layers) {
+        if (miss_aware && layers > 0 && misses >= 0) trend.observe(t, (double) misses / (double) layers);
+    }
 
     /// One verified window of the MTP chain: `n` drafts were offered with probabilities probs[0..n), `acc` accepted.
     void observe(const float* probs, int n, int acc) {

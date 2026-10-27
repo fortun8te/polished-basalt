@@ -10139,6 +10139,7 @@ int main(int argc, char** argv) {
                                drive.d.peer_entries};
             };
             const DecSnap ds0 = dec_snap();
+            int64_t miss_seen = drive.d.multi_misses;   // the CPU-miss count when the last window ended
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             int64_t dec_windows = 0, dec_T = 0;
             const int64_t decode_hits0 = drive.d.cache_hits;
@@ -10609,6 +10610,8 @@ int main(int argc, char** argv) {
                 const Clock::time_point tw2 = Clock::now();
                 basalt::core::decode_gaps().mark(5);
                 if (!from_sfx && e0 == 0) cum_adapt.observe(dprob.data(), T - 1, a);
+                if (!from_sfx && e0 == 0) cum_adapt.note_misses(T, drive.d.multi_misses - miss_seen, (int) g.n_layers);
+                miss_seen = drive.d.multi_misses;
                 mtp.set_cum_th(cum_adapt.th());
                 const bool drafted = eos || produced_n >= max_new || !mtp_on ||
                                      mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data());
@@ -11205,6 +11208,7 @@ int main(int argc, char** argv) {
         }
         const double pool_ms0 = drive.cpu_ms;
         const int64_t misses0 = drive.d.multi_misses, entries0 = drive.d.multi_entries;
+        int64_t miss_seen = misses0;   // the CPU-miss count when the last window ended
         while ((int64_t) produced.size() < o.max_new) {
             const Clock::time_point t0 = Clock::now();
             int T = S_mtp;
@@ -11286,6 +11290,8 @@ int main(int argc, char** argv) {
                 break;
             }
             if (use_mtp && !from_sfx) cum_adapt.observe(dprob.data(), T - 1, a);
+            if (use_mtp && !from_sfx) cum_adapt.note_misses(T, drive.d.multi_misses - miss_seen, (int) g.n_layers);
+            miss_seen = drive.d.multi_misses;
             if (use_mtp) mtp.set_cum_th(cum_adapt.th());
             const bool drafted = !use_mtp || (int64_t) produced.size() >= o.max_new ||
                                  mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data());

@@ -6,7 +6,9 @@
 //      the windows the rule keeps;
 //   4. drafts accepted more often than predicted still lower it to kLo;
 //   5. a raised threshold comes back when no draft is offered, and when acceptance recovers;
-//   6. the same holds at the heavier CPU-expert scale.
+//   6. the same holds at the heavier CPU-expert scale;
+//   7. with the miss trend on, windows missing less than they used to lower the threshold and windows missing more
+//      raise it, within 0.85 to 1.2 times; a change in which window sizes get chosen moves nothing; off, it is inert.
 #include "basalt/core/draft_cum.hpp"
 
 #include <algorithm>
@@ -174,6 +176,44 @@ int main() {
         check(std::fabs(base - 0.525f) < 1e-6f && a.cur <= 1.3f * base * 1.0001f && a.cur > base,
               "scaled base 0.525: the raised threshold stays within 1.3 times it");
         draft_cum_cpu_mb() = 0.0f;
+    }
+    {
+        // off (the default): misses are ignored and the threshold is exactly the rule's
+        DraftCumAdapt a;
+        a.miss_aware = false;
+        for (int w = 0; w < 200; ++w) a.note_misses(4, w < 100 ? 480 : 40, 40);
+        check(a.th() == a.cur && a.trend.scale == 1.0f, "miss trend off: the threshold is the rule's own");
+
+        auto drive = [&](DraftCumAdapt& d, int windows, double miss_per_layer, int t_lo, int t_hi) {
+            for (int w = 0; w < windows; ++w) {
+                const int t = t_lo + w % (t_hi - t_lo + 1);
+                d.note_misses(t, (int64_t) std::llround(miss_per_layer * (t + 3) * 40.0), 40);   // grows with the size
+            }
+        };
+        DraftCumAdapt b;
+        b.miss_aware = true;
+        drive(b, 8, 2.0, 2, 5);
+        check(b.trend.scale == 1.0f, "miss trend on, not warm yet: no change");
+        drive(b, 400, 2.0, 2, 5);
+        check(std::fabs(b.trend.scale - 1.0f) < 1e-3f, "steady misses: no change");
+        const float steady = b.th();
+        drive(b, 60, 1.2, 2, 5);    // the VRAM tier has warmed: windows miss 40% less
+        check(b.trend.scale < 1.0f && b.trend.scale >= 0.85f && b.th() < steady, "misses fall: the threshold falls (floor 0.85)");
+        DraftCumAdapt c;
+        c.miss_aware = true;
+        drive(c, 400, 2.0, 2, 5);
+        drive(c, 60, 4.0, 2, 5);    // a new topic: windows miss twice as much
+        check(c.trend.scale > 1.0f && c.trend.scale <= 1.2f && c.th() > c.cur, "misses rise: the threshold rises (cap 1.2)");
+        DraftCumAdapt d;
+        d.miss_aware = true;
+        drive(d, 400, 2.0, 2, 5);
+        drive(d, 400, 2.0, 5, 5);   // only size 5 is chosen from now on, at the same misses per size
+        drive(d, 400, 2.0, 2, 2);
+        check(std::fabs(d.trend.scale - 1.0f) < 1e-3f, "a change in the window sizes chosen moves nothing");
+        DraftCumAdapt e;
+        e.miss_aware = true;
+        for (int w = 0; w < 300; ++w) e.note_misses(3, 0, 40);   // everything in VRAM
+        check(e.trend.scale == 1.0f && std::isfinite(e.th()), "no CPU misses at all: no change, no NaN");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
