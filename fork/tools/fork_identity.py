@@ -291,15 +291,27 @@ def build_info(build_dir: Path | None) -> dict:
     return info
 
 
-def candidate_id(src: dict, bins: dict) -> str:
-    eng = bins[f"{BIN_DIR}/{ENGINE}"]["sha256"]
-    return f"c-{src['commit'][:10]}-{src['tree_sha256'][:8]}-{eng[:8]}"
+def candidate_id(src: dict, bins: dict, models: dict, build: dict) -> str:
+    identity = {"source": src, "binaries": bins, "models": {
+        path: {key: record[key] for key in ("sha256", "size")} for path, record in models.items()
+    }, "build": build}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return f"c-{src['commit'][:10]}-{digest[:24]}"
 
 
 # ------------------------------------------------------------------------------------------------ record / archive
 
 def _archive(root: Path, manifest: dict, hashes: dict[str, str]) -> Path:
     cdir = root / CANDIDATES / manifest["id"]
+    if cdir.exists():
+        # A recorded candidate is immutable, including its original evidence timestamp.
+        old = read_json(cdir / MANIFEST)
+        if old["id"] != manifest["id"] or read_json(cdir / "tree.json") != hashes:
+            raise IdentityError("the existing candidate archive does not match its identity")
+        for rel, rec in manifest["binaries"].items():
+            if not (cdir / rel).is_file() or sha256_file(cdir / rel) != rec["sha256"]:
+                raise IdentityError(f"the existing candidate archive is damaged: {rel}")
+        return cdir
     if not (root / CANDIDATES / ".gitignore").exists():
         (root / CANDIDATES).mkdir(parents=True, exist_ok=True)
         (root / CANDIDATES / ".gitignore").write_text("*\n")
@@ -368,7 +380,7 @@ def record(root, build_dir=None, extra_models=(), allow_dirty=False, reuse_model
     manifest = {"schema": SCHEMA, "recorded_utc": utc_now(), "engine": f"{BIN_DIR}/{ENGINE}", "source": src,
                 "binaries": bins, "profiles": arms, "models": models, "build": build_info(build_dir),
                 "python": sys.version.split()[0], "platform": platform.platform()}
-    manifest["id"] = candidate_id(src, bins)
+    manifest["id"] = candidate_id(src, bins, models, manifest["build"])
     _archive(root, manifest, hashes)
     write_json(root / MANIFEST, manifest)
     write_json(root / ROLLBACK, _rollback_record(root, manifest, previous_manifest))
