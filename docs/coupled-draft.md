@@ -51,15 +51,15 @@ refits the bins from `--draft-log` windows taken with the switch on, in the host
 together (they must stay the same products in the same order).
 
 ## Code locations
-- `src/core/mtp.cpp:944-971` `record_forward` head: the fused `T == 1` top-1 paths (946-956) must be skipped when
-  coupled; the logits paths (957-962) already fill `head_logits_`; the greedy pick (964-971) is replaced by the new
+- `src/core/mtp.cpp:944-972` `record_forward` head: the fused `T == 1` top-1 paths (944-954) must be skipped when
+  coupled; the logits paths (955-962) already fill `head_logits_`; the greedy pick (966-972) is replaced by the new
   call. `row_top_prob`/`map_ids` for the subset vocabulary (`dvocab_`, `n_tier1_`) are the mapping to reproduce.
 - `mtp.cpp:1024-1075` `record_round` / `record_step`, `1142-1260` `capture_round` / `capture_step` / `capture_cond`:
   the new kernels are plain nodes in these captures (the cond graphs' `ctail_` hook after `step_end` is unchanged,
   because `probs_` and `out_ids_` keep their meaning). Parameters live in device memory, so no per-request recapture.
-- `mtp.cpp:1404-1470` `draft_rows`: `put()` writes the cell; `h_row_` slot 2 is reserved, slot 3 is the threshold.
+- `mtp.cpp:1404-1470` `draft_rows`: `put()` (1443-1445) writes the cell; `h_row_` slot 2 is reserved, slot 3 is the threshold.
 - `src/kernels/cuda/sampler.cu`: `sampled_tail_warp<kProb>` (374, already takes `prob_out`), `warp_merge_lists` (542),
-  the split part and `sampler_split_merge_kernel` (590-690), `apply_penalties` / `history_count` (70-76).
+  the split part and `sampler_split_merge_kernel` (587-690), `apply_penalties` / `history_count` (70-76).
 - `include/basalt/kernels/sampler.hpp:15` `SamplerParams`; `include/basalt/core/verify.hpp:160` `set_sampling` (its
   comment says the drafter never sees the request's sampling: that changes).
 - `src/program/generate.cpp`: next to `ver.set_sampling(req_sp)` (9519, 9539) and the CLI's (10664); the batch path
