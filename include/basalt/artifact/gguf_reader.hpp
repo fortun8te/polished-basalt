@@ -217,7 +217,10 @@ struct TensorInfo {
     uint64_t offset = 0;
     uint64_t elements() const {
         uint64_t n = 1;
-        for (auto d : shape) n *= d;
+        for (auto d : shape) {
+            if (d == 0 || n > (std::numeric_limits<uint64_t>::max)() / d) return 0;
+            n *= d;
+        }
         return n;
     }
     const char* type_name() const { return ggml_type_name(type); }
@@ -229,7 +232,7 @@ class Cursor {
 public:
     Cursor(const uint8_t* base, size_t size) : base_(base), size_(size) {}
     void need(size_t n) const {
-        if (pos_ + n > size_) throw std::runtime_error("GGUF: unexpected end of file in header");
+        if (pos_ > size_ || n > size_ - pos_) throw std::runtime_error("GGUF: unexpected end of file in header");
     }
     template <class T> T read() {
         need(sizeof(T));
@@ -240,12 +243,14 @@ public:
     }
     std::string str() {
         const uint64_t n = read<uint64_t>();
+        if (n > (std::numeric_limits<size_t>::max)()) throw std::runtime_error("GGUF: string too long");
         need((size_t)n);
         std::string s(reinterpret_cast<const char*>(base_ + pos_), (size_t)n);
         pos_ += (size_t)n;
         return s;
     }
     size_t pos() const { return pos_; }
+    size_t remaining() const { return size_ - pos_; }
 
 private:
     const uint8_t* base_;
@@ -419,12 +424,14 @@ private:
             throw std::runtime_error("GGUF v" + std::to_string(version_) + ", this reader handles v3");
         const uint64_t n_tensors = c.read<uint64_t>();
         const uint64_t n_kv = c.read<uint64_t>();
+        if (n_kv > c.remaining() / 12) throw std::runtime_error("GGUF: implausible metadata count");
 
         for (uint64_t i = 0; i < n_kv; ++i) {
             std::string key = c.str();
             MetaType t = (MetaType)c.read<uint32_t>();
             meta_.emplace(std::move(key), read_value(c, t));
         }
+        if (n_tensors > c.remaining() / 32) throw std::runtime_error("GGUF: implausible tensor count");
         tensors_.reserve((size_t)n_tensors);
         // GGUF has no index to arbitrate between two tensors of one name: find() is first-match, so a
         // duplicate would silently win by position.  Refuse the file at open instead, naming both.
@@ -446,7 +453,11 @@ private:
         if (const MetaValue* a = get("general.alignment"))
             if (a->u) align = a->u;
         alignment_ = align;
-        data_start_ = (c.pos() + align - 1) / align * align;
+        const uint64_t pos = c.pos();
+        const uint64_t padding = pos % align == 0 ? 0 : align - pos % align;
+        if (padding > (std::numeric_limits<uint64_t>::max)() - pos)
+            throw std::runtime_error("GGUF: invalid alignment");
+        data_start_ = pos + padding;
         if (data_start_ > size_) throw std::runtime_error("GGUF: data section starts past EOF");
     }
 

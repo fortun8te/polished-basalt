@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -80,7 +81,11 @@ struct Scan {
         ws();
         const size_t b = i;
         v = 0;
-        while (i < s.size() && s[i] >= '0' && s[i] <= '9') v = v * 10 + (s[i++] - '0');
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+            const int d = s[i++] - '0';
+            if (v > ((std::numeric_limits<int64_t>::max)() - d) / 10) return false;
+            v = v * 10 + d;
+        }
         return i > b;
     }
 };
