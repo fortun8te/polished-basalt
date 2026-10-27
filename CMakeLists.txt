@@ -490,6 +490,11 @@ if(BUILD_TESTING)
   add_executable(vision_preprocess_test tests/vision/preprocess_limit_test.cpp)
   target_link_libraries(vision_preprocess_test PRIVATE vision_core)
   basalt_cpu_test(NAME vision_preprocess_test COMMAND vision_preprocess_test)
+  # the canvas of a thin picture and of a small token interval, and the side cap
+  add_executable(hardening_vision tests/vision/hardening_vision.cpp)
+  target_link_libraries(hardening_vision PRIVATE vision_core)
+  basalt_embed_manifest(hardening_vision)
+  basalt_cpu_test(NAME hardening_vision COMMAND hardening_vision)
   # a corrupt projector file: counts, alignment, dimensions, offsets, nested arrays, repeated tensors
   add_executable(hardening_vision_mmproj tests/vision/hardening_vision_mmproj.cpp)
   target_link_libraries(hardening_vision_mmproj PRIVATE vision_core)

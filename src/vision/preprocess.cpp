@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -31,6 +32,11 @@ bool decode_image(const uint8_t* data, size_t len, Image& out, std::string& err,
         err = "the image is " + std::to_string(w) + "x" + std::to_string(h) + " pixels; the limit is " + limit;
         return false;
     }
+    if (w > kMaxImageSide || h > kMaxImageSide) {
+        err = "the image is " + std::to_string(w) + "x" + std::to_string(h) + " pixels; a side may not pass " +
+              std::to_string(kMaxImageSide);
+        return false;
+    }
     uint8_t* px = stbi_load_from_memory(data, n, &w, &h, &c, 3);
     if (!px) {
         err = stbi_failure_reason() ? stbi_failure_reason() : "unreadable image";
@@ -44,23 +50,42 @@ bool decode_image(const uint8_t* data, size_t len, Image& out, std::string& err,
 }
 
 Size fit_size(int w, int h, const Geometry& g) {
-    if (w <= 0 || h <= 0) return {0, 0};
+    if (w <= 0 || h <= 0 || g.patch <= 0 || g.merge <= 0 || g.min_tokens <= 0 || g.max_tokens < g.min_tokens ||
+        (int64_t) g.patch * g.merge > std::numeric_limits<int>::max())
+        return {0, 0};
     const int f = g.patch * g.merge;
-    const int64_t min_px = (int64_t) g.min_tokens * f * f, max_px = (int64_t) g.max_tokens * f * f;
-    auto round_f = [f](float x) { return (int) std::round(x / (float) f) * f; };
-    auto ceil_f = [f](float x) { return (int) std::ceil(x / (float) f) * f; };
-    auto floor_f = [f](float x) { return (int) std::floor(x / (float) f) * f; };
-    int wb = std::max(f, round_f((float) w)), hb = std::max(f, round_f((float) h));
-    if ((int64_t) hb * wb > max_px) {
-        const float beta = std::sqrt((float) h * (float) w / (float) max_px);
-        hb = std::max(f, floor_f((float) h / beta));
-        wb = std::max(f, floor_f((float) w / beta));
-    } else if ((int64_t) hb * wb < min_px) {
-        const float beta = std::sqrt((float) min_px / ((float) h * (float) w));
-        hb = ceil_f((float) h * beta);
-        wb = ceil_f((float) w * beta);
+    if ((int64_t) g.max_tokens * f > std::numeric_limits<int>::max()) return {0, 0};
+    const double min_px = (double) g.min_tokens * f * f, max_px = (double) g.max_tokens * f * f;
+    // Whole merge units along a side, at least one and at most max_tokens.
+    auto units = [f, &g](double v, bool up) {
+        const double n = up ? std::ceil(v / f) : std::floor(v / f);
+        return (int) std::max(1.0, std::min((double) g.max_tokens, n));
+    };
+    int x = units((double) w + f * 0.5, false), y = units((double) h + f * 0.5, false);
+    if ((double) x * y * f * f > max_px) {
+        const double beta = std::sqrt((double) h * w / max_px);
+        x = units(w / beta, false);
+        y = units(h / beta, false);
+    } else if ((double) x * y * f * f < min_px) {
+        const double beta = std::sqrt(min_px / ((double) h * w));
+        x = units(w * beta, true);
+        y = units(h * beta, true);
     }
-    return {wb, hb};
+    // The one-unit floor on the short side of a thin picture can leave the product outside the interval: trim or raise
+    // the longer side to bring it back.
+    if ((int64_t) x * y > g.max_tokens) {
+        if (x >= y) x = std::max(1, g.max_tokens / y);
+        else y = std::max(1, g.max_tokens / x);
+    }
+    if ((int64_t) x * y < g.min_tokens) {
+        if (x >= y) x = (int) (((int64_t) g.min_tokens + y - 1) / y);
+        else y = (int) (((int64_t) g.min_tokens + x - 1) / x);
+        if ((int64_t) x * y > g.max_tokens) {   // min_tokens is not a multiple of the short side: one row of min_tokens
+            if (w >= h) { x = g.min_tokens; y = 1; }
+            else { x = 1; y = g.min_tokens; }
+        }
+    }
+    return {x * f, y * f};
 }
 
 namespace {
