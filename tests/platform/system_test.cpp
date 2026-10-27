@@ -53,6 +53,13 @@ int main() {
     check(!fork_switch("SYSTEM_TEST_OFF"), "fork_switch is off when the variable is 0");
     check(fork_switch("SYSTEM_TEST_ON"), "and on when it is 1");
     check(fork_switch("SYSTEM_TEST_UNSET"), "and on when it is not set");
+    set_env("BASALT_FORK_SYSTEM_TEST_NUM", "0.8");
+    set_env("BASALT_FORK_SYSTEM_TEST_BIG", "9");
+    set_env("BASALT_FORK_SYSTEM_TEST_WORD", "abc");
+    check(fork_number("SYSTEM_TEST_NUM", 1.0, 0.25, 4.0) == 0.8, "fork_number reads a number within its range");
+    check(fork_number("SYSTEM_TEST_BIG", 1.0, 0.25, 4.0) == 1.0, "and keeps the default outside it");
+    check(fork_number("SYSTEM_TEST_WORD", 1.0, 0.25, 4.0) == 1.0, "and for a word");
+    check(fork_number("SYSTEM_TEST_UNSET_NUM", 1.0, 0.25, 4.0) == 1.0, "and when it is not set");
 
     unsigned os_error = 0;
     const FullSpeed fs = keep_full_speed(&os_error);
