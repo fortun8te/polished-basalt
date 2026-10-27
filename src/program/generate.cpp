@@ -7279,6 +7279,7 @@ int main(int argc, char** argv) {
             int32_t sbuf[16] = {};
             int sk = 0, smatch = 0;
             bool from_sfx = false;
+            bool sagree = true;        ///< the lookup's first token is the MTP's first draft
             double acc = 0.6;          ///< drafts accepted per offered, smoothed: who gets the free rows
             int64_t since_draft = 0;   ///< windows since the slot last drafted
             int64_t windows = 0;
@@ -7758,20 +7759,22 @@ int main(int argc, char** argv) {
                     int T = 1;
                     while (T < S_mtp && T - 1 < sl.n_dr && basalt::core::draft_keep(sl.dprob, T - 1, sl.cum.th())) ++T;
                     sl.from_sfx = false;
+                    sl.sagree = true;
                     sl.sk = 0;
                     if (sl.sfx && sl.n_dr > 0) {
                         sl.sk = sl.sfx->propose(S_all - 1, sl.sbuf);
                         sl.smatch = sl.sfx->last_match();
-                        if (sl.sk > 0 && sl.sbuf[0] == sl.dr[0]) {
-                            const basalt::spec::DraftPolicy::Pick pk = bpolicy.choose(T, sl.sk, sl.smatch);
-                            if (pk.lookup) { T = pk.t; sl.from_sfx = true; }
+                        if (sl.sk > 0) {   // a lookup that differs from the MTP's first draft is the policy's call
+                            const bool agree = sl.sbuf[0] == sl.dr[0];
+                            const basalt::spec::DraftPolicy::Pick pk = bpolicy.choose(T, sl.sk, sl.smatch, agree);
+                            if (pk.lookup) { T = pk.t; sl.from_sfx = true; sl.sagree = agree; }
                         }
                     }
                     const int64_t room = slot_cap[(size_t) rows[sg]] - sl.p - 1;
                     T = (int) std::max<int64_t>(1, std::min<int64_t>(T, room));
                     Tw[sg] = T;
                     float c = 1.0f;
-                    const double q = sl.from_sfx ? bpolicy.lookup_rate(sl.smatch) : 0.0;
+                    const double q = !sl.from_sfx ? 0.0 : sl.sagree ? bpolicy.lookup_rate(sl.smatch) : bpolicy.override_rate(sl.smatch);
                     for (int j = 0; j + 1 < 8; ++j) {   // val[j]: the chance drafts 0..j are all accepted
                         c *= sl.from_sfx ? (float) q : basalt::core::draft_cum_acc(sl.dprob[j]);
                         val[sg][j] = c;
@@ -7962,7 +7965,8 @@ int main(int argc, char** argv) {
                     sl.drafts_accepted += a;
                     if (sl.sfx) for (int e = 0; e < k; ++e) sl.sfx->append(outb[r0s[sg] + e]);
                     if (sl.windows > 0 && fin_of[sg] == nullptr)
-                        bpolicy.observe(sl.from_sfx, Tw, a, sl.smatch, (msd(w0, w2) + bt_draft_last) * (double) Tw / (double) R);
+                        bpolicy.observe(sl.from_sfx, Tw, a, sl.smatch, (msd(w0, w2) + bt_draft_last) * (double) Tw / (double) R,
+                                        sl.sagree);
                     ++sl.windows;
                     bt_slotwin += 1;
                     bt_tokens += k;
@@ -10175,16 +10179,18 @@ int main(int argc, char** argv) {
                     if (p >= ppl->end()) break;
                     T = (int) std::min<int64_t>(req_ppl_t, ppl->end() - p);
                 }
-                // a repeat of earlier context (prompt lookup) where the MTP's own first guess agrees: the policy takes it
-                // when its expected tokens per ms, from the measured acceptance and window costs, beat the MTP window's
-                bool from_sfx = false;
+                // a repeat of earlier context (prompt lookup) where the MTP's own first guess agrees (or, with the
+                // override, where lookups have earned the right to differ): the policy takes it when its expected
+                // tokens per ms, from the measured acceptance and window costs, beat the MTP window's
+                bool from_sfx = false, sfx_agree = true;
                 int sfx_match = 0;
                 if (o.suffix_draft > 0 && !first_window && ppl == nullptr && !held.on) {
                     const int k = sfx.propose(S - 1, sbuf.data());
                     sfx_match = sfx.last_match();
-                    if (k > 0 && sbuf[0] == drafts[0]) {
-                        const basalt::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match);
-                        if (pk.lookup) { T = pk.t; from_sfx = true; }
+                    if (k > 0) {   // a lookup that differs from the MTP's first draft is the policy's call
+                        const bool agree = sbuf[0] == drafts[0];
+                        const basalt::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match, agree);
+                        if (pk.lookup) { T = pk.t; from_sfx = true; sfx_agree = agree; }
                     }
                 }
                 const bool timed_round = !first_window;
@@ -10569,7 +10575,7 @@ int main(int argc, char** argv) {
                     }
                     if (timed_round && !eos)
                         policy.observe(from_sfx, T, a, sfx_match,
-                                       std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
+                                       std::chrono::duration<double, std::milli>(Clock::now() - round0).count(), sfx_agree);
                     basalt::core::decode_gaps().mark(17);
                     if (eos) { finish = "stop"; break; }
                     if (halted()) { finish = "cancel"; break; }
@@ -10624,7 +10630,7 @@ int main(int argc, char** argv) {
                 }
                 if (timed_round && !eos)
                     policy.observe(from_sfx, T, a, sfx_match,
-                                   std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
+                                   std::chrono::duration<double, std::milli>(Clock::now() - round0).count(), sfx_agree);
                 basalt::core::decode_gaps().mark(17);
                 if (eos) { finish = "stop"; break; }
                 if (halted()) { finish = "cancel"; break; }
@@ -11207,14 +11213,15 @@ int main(int argc, char** argv) {
                 while (T < S_mtp && basalt::core::draft_keep(dprob.data(), T - 1, cum_adapt.th())) ++T;
             }
             if (first_window) T = 1;
-            bool from_sfx = false;
+            bool from_sfx = false, sfx_agree = true;
             int sfx_match = 0;
             if (o.suffix_draft > 0 && !first_window) {
                 const int k = sfx.propose(o.spec - 1, sbuf.data());
                 sfx_match = sfx.last_match();
-                if (k > 0 && (!use_mtp || sbuf[0] == drafts[0])) {
-                    const basalt::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match);
-                    if (pk.lookup) { T = pk.t; from_sfx = true; }
+                if (k > 0) {   // a lookup that differs from the MTP's first draft is the policy's call
+                    const bool agree = !use_mtp || sbuf[0] == drafts[0];
+                    const basalt::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match, agree);
+                    if (pk.lookup) { T = pk.t; from_sfx = true; sfx_agree = agree; }
                 }
             }
             const bool timed_round = !first_window;
@@ -11291,7 +11298,7 @@ int main(int argc, char** argv) {
             p += a + 1;
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             total_ms += round_ms;
-            if (timed_round) policy.observe(from_sfx, T, a, sfx_match, round_ms);
+            if (timed_round) policy.observe(from_sfx, T, a, sfx_match, round_ms, sfx_agree);
             if (rounds % 64 == 0)
                 basalt::log::info("basalt generate", "position %lld, %lld tokens, %lld rounds", (long long) p,
                              (long long) produced.size(), (long long) rounds);
