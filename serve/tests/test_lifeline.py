@@ -103,6 +103,7 @@ class ServerKilled(unittest.TestCase):
 
     def launch(self, mode):
         proc = subprocess.Popen([sys.executable, str(self.script), mode], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stdout.close)
         info = json.loads(proc.stdout.readline())
         self.pids += [info["server"], info["child"]]
         self.assertTrue(self.alive(info["child"]))
