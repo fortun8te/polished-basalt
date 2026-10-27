@@ -1,0 +1,45 @@
+{
+  "listen": "127.0.0.1:8081",
+  "upstream": "http://127.0.0.1:8080",
+  "max_inflight": 1,
+  "queue": {
+    "max_wait_s": 120,
+    "reorder_window": 4,
+    "max_skips": 4,
+    "keepalive_after_s": 15,
+    "keepalive_every_s": 10
+  },
+  "prefix": {"bytes": 8192, "messages": 1},
+  "classify": {
+    "default": "interactive",
+    "rules": [
+      {"name": "header-interactive", "header": {"x-priority": "^interactive$"}, "class": "interactive"},
+      {"name": "header-background", "header": {"x-priority": "^background$"}, "class": "background"},
+      {"name": "small-model-slot", "model": "haiku", "class": "background"},
+      {"name": "model-file-name", "model": "\\.basalt$", "class": "background"},
+      {"name": "tiny-untooled", "max_tokens_lte": 512, "tools": false, "class": "background"}
+    ]
+  },
+  "policy": {
+    "enabled": false,
+    "rules": [
+      {
+        "name": "background-lean",
+        "class": "background",
+        "set_default": {"reasoning_budget_tokens": 256},
+        "max_tokens_cap": 1024
+      }
+    ]
+  },
+  "fallback": {
+    "enabled": false,
+    "base_url": "https://api.example.com",
+    "after_s": 30,
+    "classes": ["background"],
+    "headers": {"x-api-key": "${CLOUD_API_KEY}", "anthropic-version": "2023-06-01"},
+    "force": {"model": "small-cloud-model"},
+    "forward_client_auth": false
+  },
+  "allowed_hosts": [],
+  "log": {"file": null}
+}
