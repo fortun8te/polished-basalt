@@ -129,7 +129,8 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
 
 // The staged share's RAM addresses (a mapped, 16-byte aligned copy or 0), read again when the source's places moved
 // since: between windows, on the window's stream ahead of it.  The last window synchronized its stream, so the host
-// copy is free to rewrite.
+// copy is free to rewrite.  Only the span that changed is uploaded, in copy_small's pieces: a single window reads them
+// again after an adaptive round, whose expert copies may still be queued on the card's copy engine.
 bool Verifier::dm_stage_places(std::string& err) {
     DecMoe* d = dm_;
     if (d == nullptr || d->stage_src == nullptr) return true;
@@ -137,17 +138,22 @@ bool Verifier::dm_stage_places(std::string& err) {
     if (gen == d->stage_gen) return true;
     const ModelGeometry& g = *g_;
     const int64_t LE = g.n_layers * g.n_expert;
-    bool changed = false;
+    int64_t a = LE, b = 0;   // the entries [a, b) hold every change
     for (int64_t i = 0; i < LE; ++i) {
         const unsigned long long p = (unsigned long long) warm_src_->device_alias(i / g.n_expert, i % g.n_expert);
         const unsigned long long v = (p & 15ull) == 0 ? p : 0ull;
-        changed = changed || d->stage_host[i] != v;
+        if (d->stage_host[i] == v) continue;
+        if (a == LE) a = i;
+        b = i + 1;
         d->stage_host[i] = v;
     }
     d->stage_gen = gen;
-    if (changed && cudaMemcpyAsync(d->stage_src, d->stage_host, (size_t) LE * 8, cudaMemcpyHostToDevice, cs_) != cudaSuccess) {
-        err = std::string("verify: the staged share's addresses: ") + cudaGetErrorString(cudaGetLastError());
-        return false;
+    if (a < b) {
+        const cudaError_t e = copy_small(d->stage_src + a, d->stage_host + a, (size_t) (b - a) * 8, cs_);
+        if (e != cudaSuccess) {
+            err = std::string("verify: the staged share's addresses: ") + cudaGetErrorString(e);
+            return false;
+        }
     }
     return true;
 }

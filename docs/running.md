@@ -54,10 +54,12 @@ loan and its KV take hold, before they are taken, only experts the decoding slot
 lately trade places with less-routed experts of their layer, so the slots keep their experts in VRAM while the prompt
 is read. A prompt that arrives while no other slot is decoding is read as in the single-stream path.
 
-On one card, a batch window's layer with enough CPU misses sends a share of them over PCIe: CUDA0 copies them from
-their RAM copies into VRAM staging and computes them while the CPU pool computes the rest, both reading RAM at once.
-The startup line `batch windows: a layer with N+ CPU misses sends a share of them over PCIe to CUDA0` gives the
-threshold. A request decoding alone runs the single-stream path and is not affected.
+On one card, a decode window's layer with enough CPU misses sends a share of them over PCIe, for a request decoding
+alone as for a batch window: CUDA0 copies them from their RAM copies into VRAM staging and computes them while the CPU
+pool computes the rest, both reading RAM at once. Only experts whose RAM copy is page-locked and mapped into the GPU
+are staged. The startup line `the staged share: a window's layer with N+ CPU misses sends some of them over PCIe to
+CUDA0` gives the threshold (with batch slots, `batch windows: a layer with N+ CPU misses ...` again), and `the staged
+share is off: ...` says why a card without peers does not stage. A request's `pcie=` figure counts the staged entries.
 
 At startup the server prints one `[server] kv` line per device with all the session state placed there, for
 example `12.5GiB cuda2 solo=262144 slots=2x262144 draft=0.5GiB`. With elastic KV (the default for a server whose

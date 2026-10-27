@@ -195,30 +195,49 @@ bool Verifier::dm_init(std::string& err) {
         w->logits.assign((size_t) kVerifyMaxT * g.n_expert, 0.0f);
         d->warm = w;
     }
-    // The staged share: on one card, a batch window's layer with enough CPU misses sends some of them to CUDA0, copied
+    // The staged share: on one card, a window's layer with enough CPU misses sends some of them to CUDA0, copied
     // over PCIe from their RAM copies into staging while the pool reads the rest.  An expert without a mapped RAM copy
-    // is never staged; the addresses are read again before a batch window when the source's places moved (a swap).
+    // is never staged; the addresses are read again before a window when the source's places moved (a swap).
     // The count staged for m misses balances the pool's time for the rest against the copy's, both reading host
     // memory at once.
-    bool stage = d->pdev < 0 && d->xp.empty() && lb_ == 0 && le_ == g.n_layers && hand_in_ == nullptr &&
-                 warm_src_ != nullptr && staging_ != nullptr && warm_src_->pcie_layer(0) && lay.fmt[0].bytes % 16 == 0;
-    for (int64_t l = 1; stage && l < g.n_layers; ++l) stage = lay.fmt[(size_t) l].bytes == lay.fmt[0].bytes;
-    const int64_t blob = (int64_t) lay.fmt[0].bytes, stride = dec_moe_stage_stride(blob);
+    // Layers whose blobs differ in size (mixed-type packs) share one slot stride, sized for the largest blob.
+    const bool one_card = d->pdev < 0 && d->xp.empty() && lb_ == 0 && le_ == g.n_layers && hand_in_ == nullptr &&
+                          warm_src_ != nullptr && staging_ != nullptr;
+    const bool ram_mapped = one_card && warm_src_->pcie_layer(0);
+    bool stage = ram_mapped;
+    int64_t blob = 0;
+    for (int64_t l = 0; stage && l < g.n_layers; ++l) {
+        stage = lay.fmt[(size_t) l].bytes % 16 == 0;
+        blob = std::max<int64_t>(blob, (int64_t) lay.fmt[(size_t) l].bytes);
+    }
+    const int64_t stride = dec_moe_stage_stride(blob);
     const int stage_slots =
         (int) std::min<int64_t>(kDmStageMax, (int64_t) (kStagingBlobs * (int64_t) lay.max_blob) / stride);
+    // A/B and calibration gates (--exp): stage_solo=0 stages in batch windows only; stage_pool_gbs, stage_link_gbs,
+    // stage_fix_us and stage_blocks replace the cost model's rates, the copy's fixed cost and the copy's blocks
+    const auto gate = [](const char* name, double def, double lo, double hi) {
+        const double v = exp_flag(name, def);
+        return v >= lo && v <= hi ? v : def;
+    };
+    // per layer: the pool's experts after its doorbell, the staged ones after the copy, their own launches and the
+    // combine's wait for them
+    const double pool_bpus = gate("stage_pool_gbs", 45.0, 1.0, 1000.0) * 1e3,
+                 link_bpus = gate("stage_link_gbs", 18.0, 1.0, 1000.0) * 1e3,
+                 stage_fix_us = gate("stage_fix_us", 35.0, 0.0, 10000.0);
+    constexpr double kPoolFixUs = 15.0;
+    std::vector<int32_t> kt((size_t) kDmCap + 1, 0);
     if (stage && stage_slots >= 1) {
-        // per layer: the pool's experts after its doorbell, the staged ones after the copy, their own launches and
-        // the combine's wait for them
-        constexpr double kPoolBytesPerUs = 45e3, kLinkBytesPerUs = 18e3, kPoolFixUs = 15.0, kStageFixUs = 35.0;
-        const double cpu_us = (double) blob / kPoolBytesPerUs, link_us = (double) blob / kLinkBytesPerUs;
-        std::vector<int32_t> kt((size_t) kDmCap + 1, 0);
+        const double cpu_us = (double) blob / pool_bpus, link_us = (double) blob / link_bpus;
         for (int m = 1; m <= kDmCap; ++m) {
             double best = kPoolFixUs + m * cpu_us;
             for (int k = 1; k <= std::min(m, stage_slots); ++k) {
-                const double t = std::max(kPoolFixUs + (m - k) * cpu_us, kStageFixUs + k * link_us);
+                const double t = std::max(kPoolFixUs + (m - k) * cpu_us, stage_fix_us + k * link_us);
                 if (t < best) { best = t; kt[(size_t) m] = k; }
             }
         }
+    }
+    const bool pays = std::any_of(kt.begin(), kt.end(), [](int32_t k) { return k > 0; });
+    if (stage && stage_slots >= 1 && pays) {
         int st_least = 0, st_greatest = 0;   // the copy's blocks go first as the FFN read's leave the SMs
         bool sok = cudaMalloc((void**) &d->stage_src, (size_t) LE * 8) == cudaSuccess &&
                    cudaMemset(d->stage_src, 0, (size_t) LE * 8) == cudaSuccess &&
@@ -231,11 +250,22 @@ bool Verifier::dm_init(std::string& err) {
                    cudaEventCreateWithFlags(&d->st_join, cudaEventDisableTiming) == cudaSuccess;
         if (!sok) { err = "verify: the staged share's buffers"; return false; }
         std::memset(d->stage_host, 0, (size_t) LE * 8);
-        d->stage_gen = warm_src_->places_generation() + 1;   // read at the first batch window
+        d->stage_gen = warm_src_->places_generation() + 1;   // read at the first window
         d->stage_stride = stride;
-        d->stage_blocks = 8;
+        d->stage_blocks = (int) gate("stage_blocks", 8.0, 1.0, 256.0);
+        d->stage_solo = exp_flag("stage_solo", 1.0) != 0.0;
         d->stage_min = 1;
         while (d->stage_min < kDmCap && kt[(size_t) d->stage_min] == 0) ++d->stage_min;
+        basalt::log::info("basalt verify", "the staged share: a %s layer with %d+ CPU misses sends some of them over "
+                          "PCIe to CUDA0 (%d staging slots of %.2f MB; pool %.0f GB/s, link %.0f GB/s, copy %.0f us, %d "
+                          "blocks)", d->stage_solo ? "window's" : "batch window's", d->stage_min, stage_slots,
+                          (double) stride / 1e6, pool_bpus / 1e3, link_bpus / 1e3, stage_fix_us, d->stage_blocks);
+    } else if (one_card) {   // one card and a RAM copy, but no staged share
+        basalt::log::info("basalt verify", "the staged share is off: %s",
+                          !ram_mapped ? "the experts' RAM copy is not mapped into the GPU (not page-locked)"
+                          : !stage    ? "an expert blob is not a multiple of 16 bytes"
+                          : stage_slots < 1 ? "no staging slot fits"
+                                            : "no count of CPU misses pays for a copy at these costs");
     }
     std::string served;
     if (d->pdev >= 0) {
