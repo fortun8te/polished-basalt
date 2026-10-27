@@ -12,7 +12,10 @@
 //
 // and takes the lookup window only when its best E/cost beats the MTP's by `margin`. Costs are the measured round
 // times per window size (EMA; sizes not seen yet are scaled from seen ones by a prior shape), so the policy adapts
-// to the machine and the context length. It only chooses which drafts to verify: the output is unchanged.
+// to the machine and the context length. MTP rounds and lookup rounds keep separate cost tables, because the same
+// window size need not cost the same round with each (the experts the tokens route to, the draft work after it); a
+// lookup size not measured yet is the MTP curve times the lookup/MTP ratio seen so far. It only chooses which drafts
+// to verify: the output is unchanged.
 #pragma once
 
 #include <array>
@@ -36,15 +39,25 @@ public:
     void observe(bool lookup, int t, int accepted, int match, double round_ms);
 
     double lookup_rate(int match) const;   // current q for a match length
-    double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
+    double cost_ms(int t) const;           // measured or scaled round time of an MTP window of t tokens
+    double lookup_cost_ms(int t) const;    // the same for a lookup window
+    /// One table for both sources (the single-table behaviour); set before the first observation.
+    void set_split_cost(bool on) { split_cost_ = on; }
 
 private:
+    struct Cost {
+        std::array<double, kMaxT + 1> ms{}, n{};     // round ms by window size, and the rounds behind each
+    };
     static int bucket(int match);
+    static double scaled(const Cost& c, int t);       // measured or scaled from measured sizes; < 0 with none
+    double lookup_ratio() const;                      // lookup round time / MTP round time, where both are known
+    double lookup_cost(int t, double ratio) const;
     double mtp_tokens(int t) const;
 
     int max_t_;
     double margin_;
-    std::array<double, kMaxT + 1> cost_{}, cost_n_{};      // round ms by window size
+    bool split_cost_;                                      // lookup rounds have their own cost table
+    Cost mtp_cost_, lookup_cost_;                          // lookup_cost_ stays empty unless split_cost_
     std::array<double, kMaxT + 1> mtp_tok_{}, mtp_n_{};    // tokens committed by MTP windows of that size
     std::array<double, kBuckets> ok_{}, bad_{};            // lookup drafts accepted / windows cut short, decayed
 };

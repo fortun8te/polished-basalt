@@ -1,6 +1,8 @@
 // src/spec/draft_policy.cpp - see include/basalt/spec/draft_policy.hpp.
 #include "basalt/spec/draft_policy.hpp"
 
+#include "basalt/platform/system.hpp"
+
 #include <algorithm>
 
 namespace basalt::spec {
@@ -22,7 +24,7 @@ constexpr int kProbes = 3;       // a lookup window size is tried this often bef
 }  // namespace
 
 DraftPolicy::DraftPolicy(int max_t, double margin)
-    : max_t_(std::clamp(max_t, 1, kMaxT)), margin_(margin) {}
+    : max_t_(std::clamp(max_t, 1, kMaxT)), margin_(margin), split_cost_(platform::fork_switch("SPLIT_COST")) {}
 
 int DraftPolicy::bucket(int match) {
     return match < 6 ? 0 : match < 12 ? 1 : match < 24 ? 2 : 3;
@@ -33,18 +35,44 @@ double DraftPolicy::lookup_rate(int match) const {
     return (ok_[b] + kPriorN * kPriorQ[b]) / (ok_[b] + bad_[b] + kPriorN);
 }
 
-double DraftPolicy::cost_ms(int t) const {
-    t = std::clamp(t, 1, kMaxT);
-    if (cost_n_[t] > 0) return cost_[t];
+double DraftPolicy::scaled(const Cost& c, int t) {
+    if (c.n[t] > 0) return c.ms[t];
     // scale from the measured sizes, weighting each by how often it was seen
     double num = 0.0, den = 0.0;
     for (int u = 1; u <= kMaxT; ++u)
-        if (cost_n_[u] > 0) {
-            const double w = std::min(cost_n_[u], 20.0);
-            num += w * cost_[u] * kShape[t] / kShape[u];
+        if (c.n[u] > 0) {
+            const double w = std::min(c.n[u], 20.0);
+            num += w * c.ms[u] * kShape[t] / kShape[u];
             den += w;
         }
-    return den > 0 ? num / den : kShape[t];
+    return den > 0 ? num / den : -1.0;
+}
+
+double DraftPolicy::cost_ms(int t) const {
+    t = std::clamp(t, 1, kMaxT);
+    const double c = scaled(mtp_cost_, t);
+    return c >= 0 ? c : kShape[t];
+}
+
+double DraftPolicy::lookup_ratio() const {
+    double num = 0.0, den = 0.0;
+    for (int u = 1; u <= kMaxT; ++u)
+        if (lookup_cost_.n[u] > 0) {
+            const double w = std::min(lookup_cost_.n[u], 20.0);
+            num += w * lookup_cost_.ms[u] / cost_ms(u);
+            den += w;
+        }
+    return den > 0 ? num / den : 1.0;
+}
+
+double DraftPolicy::lookup_cost(int t, double ratio) const {
+    if (!split_cost_) return cost_ms(t);
+    return lookup_cost_.n[t] > 0 ? lookup_cost_.ms[t] : ratio * cost_ms(t);
+}
+
+double DraftPolicy::lookup_cost_ms(int t) const {
+    t = std::clamp(t, 1, kMaxT);
+    return lookup_cost(t, split_cost_ ? lookup_ratio() : 1.0);
 }
 
 double DraftPolicy::mtp_tokens(int t) const {
@@ -58,12 +86,13 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
     if (lookup_k <= 0) return p;
     const double base = mtp_tokens(p.t) / cost_ms(p.t);
     const double q = lookup_rate(match);
+    const double ratio = split_cost_ ? lookup_ratio() : 1.0;
     double e = 1.0, qi = 1.0, best = 0.0;
     int best_t = 0;
     for (int k = 1; k <= std::min(lookup_k, max_t_ - 1); ++k) {
         qi *= q;
         e += qi;
-        const double r = e / cost_ms(k + 1);
+        const double r = e / lookup_cost(k + 1, ratio);
         if (r > best) { best = r; best_t = k + 1; }
     }
     if (best_t > 0 && best > base * (1.0 + margin_)) {
@@ -74,7 +103,7 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
     // a guessed cost can keep the policy from ever measuring a size: the first few times a confident lookup would
     // need a size not measured yet, it is tried (verification keeps the output; only the one round's speed is at stake)
     const int t_full = std::min(lookup_k, max_t_ - 1) + 1;
-    if (t_full > p.t && cost_n_[t_full] < kProbes && q >= 0.85) {
+    if (t_full > p.t && mtp_cost_.n[t_full] + lookup_cost_.n[t_full] < kProbes && q >= 0.85) {
         p.lookup = true;
         p.t = t_full;
     }
@@ -84,8 +113,9 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
 void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double round_ms) {
     t = std::clamp(t, 1, kMaxT);
     if (round_ms > 0) {
-        cost_[t] = cost_n_[t] > 0 ? (1.0 - kCostAlpha) * cost_[t] + kCostAlpha * round_ms : round_ms;
-        cost_n_[t] += 1.0;
+        Cost& c = lookup && split_cost_ ? lookup_cost_ : mtp_cost_;
+        c.ms[t] = c.n[t] > 0 ? (1.0 - kCostAlpha) * c.ms[t] + kCostAlpha * round_ms : round_ms;
+        c.n[t] += 1.0;
     }
     if (lookup) {
         const int b = bucket(match);
