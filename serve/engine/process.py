@@ -129,12 +129,17 @@ def frame_pipes(proc, stderr_pipe: bool) -> None:
 
 
 def pump_lines(stream, sink) -> None:
-    """Pass each line of a child's pipe to `sink` until it closes."""
+    """Pass each line of a child's pipe to `sink`, then close the owned read pipe."""
     try:
         for line in stream:
             sink(engine_line(line))
     except (OSError, ValueError):
         pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
 
 
 REQUEST_LINES = False    # --request-lines: echo the engine's per-request summary on stdout
@@ -878,12 +883,22 @@ class ProcessEngine:
         beat = time.monotonic()
         try:
             while True:
+                if cancel.is_set():
+                    return False
+                if not self.batch:
+                    raise EngineDied("the engine no longer has parallel slots; this request was not sent")
                 if not self.alive() and not getattr(self, "starting", False):
                     # engine gone and not restarting: end now rather than wait for lines nobody will answer
                     raise EngineDied("the engine stopped while this request waited; it was not sent")
                 with self.slot_cv:
                     turn = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
                 if turn and self.ctl.acquire(timeout=0.5):
+                    if cancel.is_set():
+                        self.ctl.release()
+                        return False
+                    if not self.batch:
+                        self.ctl.release()
+                        raise EngineDied("the engine no longer has parallel slots; this request was not sent")
                     if self.alive():
                         break
                     self.ctl.release()                  # died or restarting while acquiring: not this request's engine
@@ -929,6 +944,8 @@ class ProcessEngine:
         """--batch: run solo (GEN) while alone, move to a batch slot (BGEN) when others arrive, and return to solo
         when left alone. Prompt reads and admissions take the control lines one at a time; a long read may give way
         to a much shorter waiting one (BYIELD). An early-leaving consumer is STOPped/BSTOPped and drained."""
+        if not self.batch:
+            raise EngineDied("the engine no longer has parallel slots; this request was not sent")
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
         self.progress = None
@@ -982,6 +999,8 @@ class ProcessEngine:
                         head = f"GENI {left}{gen_keys()} {embeddings}" if embeddings else f"GEN {left}{gen_keys()}"
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     run0, yield_sent = len(out), False
+                    if cancel.is_set():
+                        return
                     if solo_slot is not None:
                         self.slot_held[solo_slot] = []          # the run overwrites what the slot held
                     phase = "solo"
@@ -1073,6 +1092,8 @@ class ProcessEngine:
                     left = max(1, min(left, self.max_context - len(prompt) - SLOT_MARGIN))   # the slot's room
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
+                    if cancel.is_set():
+                        return
                     head = f"BGENI {slot} {left}{gen_keys()} {embeddings}" if embeddings else f"BGEN {slot} {left}{gen_keys()}"
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     self.slot_held[slot] = []               # admission overwrites the slot
