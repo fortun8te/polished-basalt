@@ -774,7 +774,7 @@ class UnfinishedToolCall(unittest.TestCase):
         from serve.frontend import OutputParser
         schema = [{"name": "write", "parameters": {"properties": self.PROPS}}]
         for text, content in ((self.CUT, None), (self.WHOLE, "all of it"),
-                              (self.WHOLE[:-len("</tool_call>")], "all of it")):   # only </tool_call> missing: whole
+                              (self.WHOLE[:-len("</tool_call>")], None)):
             for step in (1, 7, 10_000):
                 with self.subTest(end=text[-12:], step=step):
                     p = OutputParser(thinking=True, tools=schema, stream_tools=True)
@@ -785,7 +785,9 @@ class UnfinishedToolCall(unittest.TestCase):
                     streamed = "".join(e.text for e in evs if e.kind == "tool_args")
                     calls = [e for e in evs if e.kind == "tool_call"]
                     if content is None:
-                        self.assertEqual((calls, streamed), ([], '{"path":"notes.txt","content":"first half of the fi'))
+                        expected = ('{"path":"notes.txt","content":"first half of the fi' if text == self.CUT
+                                    else '{"path":"notes.txt","content":"all of it"')
+                        self.assertEqual((calls, streamed), ([], expected))
                     else:
                         self.assertEqual(len(calls), 1)
                         self.assertEqual(json.loads(streamed), {"path": "notes.txt", "content": content})

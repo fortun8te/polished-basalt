@@ -944,7 +944,7 @@ class Service:
                 # timeout does not abort a healthy queued request; one that left while queued gives its place up.
                 got = False
                 try:
-                    while not got:
+                    while not got and not cancel.is_set():
                         got = self.fifo.acquire(timeout=QUEUE_BEAT_S)
                         if got:
                             turn.callback(self.fifo.release)
@@ -969,6 +969,10 @@ class Service:
                     with self.status_lock:
                         self.status["queued"] -= 1
                         self.waiting.pop(id(wait_key), None)
+                    if cancel.is_set():
+                        yield "done", {"finish": "cancel", "completion_tokens": 0, "reused": 0, "timings": None,
+                                       "reasoning_tokens": 0}
+                        return
                     # restart a dead or unloaded engine; parallel requests serialize this start on the fifo
                     with (self.fifo if par else contextlib.nullcontext()):
                         self.ensure_loaded()
