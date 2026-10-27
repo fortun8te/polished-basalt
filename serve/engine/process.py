@@ -15,11 +15,14 @@ Protocol (one line each):
   * `VRAM [mib]` -> `VRAM k=v ...`; `QUIT` ends the engine.
   * `ENC <image> <out> [<image> <out> ...]` (--vision-mmproj): one `ENC OK <n> <nx> <ny> <ms>` per image, or `ENC ERR`.
   * Requests share one pipe, serialized by the service FIFO (batch: by the `ctl` lock).
+  * A reply is a line that ends in a newline. Output cut inside a line, bytes that do not decode, or a numeric line
+    (T, BT, DONE, BDONE, BADM) that is not what the engine prints end the engine and every request waiting on it.
 """
 from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -136,6 +139,43 @@ def pump_lines(stream, sink) -> None:
         pass
 
 
+def _is_int(text: str) -> bool:
+    return re.fullmatch(r"-?\d+", text) is not None
+
+
+def _is_num(text: str) -> bool:
+    try:
+        return math.isfinite(float(text))
+    except ValueError:
+        return False
+
+
+DONE_INTS = (1, 2, 6, 7, 8, 9, 10, 14, 15)   # the DONE fields _parse_done reads as integers
+DONE_FIELDS = (6, 9, 11, 15, 16)             # the field counts _parse_done knows: each adds a group of figures
+
+
+def frame_fault(line: str) -> str | None:
+    """Why a complete stdout line the server reads as numbers is not what the engine prints, else None."""
+    f = line.split()
+    if not f:
+        return None
+    kind = f[0]
+    if kind == "T":
+        ok = len(f) == 2 and _is_int(f[1])
+    elif kind == "BT":                                  # BT <slot> <id>...
+        ok = len(f) >= 2 and all(_is_int(x) for x in f[1:])
+    elif kind == "DONE":
+        ok = (len(f) in DONE_FIELDS and all(_is_int(f[i]) for i in DONE_INTS if i < len(f)) and
+              all(_is_num(x) for x in (f[3], f[4], *f[6:])))
+    elif kind == "BDONE":                               # BDONE <slot> <n> <finish> <ms> [<accepted> <offered>]
+        ok = len(f) in (5, 7) and _is_int(f[1]) and _is_int(f[2]) and _is_num(f[4]) and all(_is_int(x) for x in f[5:])
+    elif kind == "BADM":
+        ok = len(f) == 3 and _is_int(f[1]) and _is_int(f[2])
+    else:
+        return None
+    return None if ok else f"a malformed {kind} line: {line.strip()[:80]!r}"
+
+
 REQUEST_LINES = False    # --request-lines: echo the engine's per-request summary on stdout
 EOS_IDS = {248044, 248046}   # <|endoftext|>, <|im_end|>: the engine's default --eos-ids
 # Engine lines for an unrecoverable verifier: the process may stay alive and print DONE, but must take no more requests.
@@ -148,6 +188,7 @@ class ProcessEngine:
     an absent or zero temperature is greedy and not forwarded."""
     silence_s = ENGINE_SILENCE_S         # kept across restart()
     silent_note = None                   # why the server ended a silent engine
+    pump_note = None                     # why the server ended an engine whose output was cut or malformed
     last_err = None                      # an ERR that was the last stdout line
     slot_drafts = {}                     # batch slot -> (accepted, offered, time) of its last BDONE, counts None when absent
     batch = 0                            # --batch: the engine's batch slots (0: one request at a time)
@@ -215,6 +256,7 @@ class ProcessEngine:
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total) prompt tokens, from PP lines
         self.silent_note = None
+        self.pump_note = None
         self.last_err = None
         try:                            # a release's BUILD.json gives its version
             self.info["version"] = json.loads((Path(engine_bin).parent / "BUILD.json").read_text()).get("version")
@@ -345,6 +387,8 @@ class ProcessEngine:
             for line in proc.stdout:
                 line = engine_line(line)
                 log_unparsed(line, log)
+                if not line.endswith("\n"):                # the output ended inside a line: not a reply
+                    return
                 out.put(line)
                 if line.startswith("READY"):
                     done = True
@@ -359,45 +403,69 @@ class ProcessEngine:
         proc, lines, log = self.proc, self.lines, self.log   # a restart replaces all three
         slot_q = self.slot_q
         reports = self.slot_reports
-        line = None
-        for line in proc.stdout:
-            line = engine_line(line)
-            log_unparsed(line, log)
-            if self.proc is proc and line.startswith(PROTOCOL_LINES):
-                self._activity_at = time.monotonic()
-            if line.startswith("SCACHE "):
-                self._slot_report(line, reports)
-                continue
-            if line.startswith(AUTO_FLAGS):             # printed once, before READY; never a reply line
-                continue
-            if line.startswith(FATAL_PREFIXES):         # before batch routing
-                if self.proc is proc:
-                    self.silent_note = "unrecoverable verification failure: " + line[4:].strip()
-                    self.ended = True
-                try:
-                    proc.terminate()
-                except OSError:
-                    pass
-                break                                   # publish EOF, never the trailing DONE
-            if line.startswith(("BT ", "BDONE ")) and slot_q:   # a batch slot's own lines (BT <slot> <id> [<id> ..])
-                try:
-                    slot_q[int(line.split()[1])].put(line)
+        last, failure = None, None
+        try:
+            for line in proc.stdout:
+                line = engine_line(line)
+                log_unparsed(line, log)
+                if not line.endswith("\n"):             # only the final fragment lacks its newline: the output was cut
+                    failure = f"the engine's output ended inside a line: {line[:80]!r}"
+                    break
+                if fault := frame_fault(line):
+                    failure = f"the engine sent {fault}"
+                    break
+                last = line
+                if self.proc is proc and line.startswith(PROTOCOL_LINES):
+                    self._activity_at = time.monotonic()
+                if line.startswith("SCACHE "):
+                    self._slot_report(line, reports)
                     continue
-                except (IndexError, ValueError):
+                if line.startswith(AUTO_FLAGS):         # printed once, before READY; never a reply line
+                    continue
+                if line.startswith(FATAL_PREFIXES):     # before batch routing
+                    if self.proc is proc:
+                        self.silent_note = "unrecoverable verification failure: " + line[4:].strip()
+                        self.ended = True
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    break                               # publish EOF, never the trailing DONE
+                if line.startswith(("BT ", "BDONE ")) and slot_q:   # a batch slot's own lines (BT <slot> <id> [<id> ..])
+                    try:
+                        slot_q[int(line.split()[1])].put(line)
+                        continue
+                    except (IndexError, ValueError):
+                        pass
+                lines.put(line)
+        except Exception as e:                          # undecodable bytes, a pipe closed under the reader, a bug
+            failure = f"the engine's output could not be read ({type(e).__name__}: {e})"
+        finally:
+            if self.proc is proc:                       # a killed engine's pump must not mark its successor
+                if failure:
+                    self.pump_note = failure
+                self.ended = True                       # output closed: it is gone
+                if last and last.startswith("ERR"):     # why it exited, when no request read it
+                    self.last_err = last[4:].strip()
+            if failure:                                 # the protocol position is lost: end the child, never share it
+                try:
+                    proc.kill()
+                except (OSError, AttributeError):
                     pass
-            lines.put(line)
-        if self.proc is proc:                           # a killed engine's pump must not mark its successor
-            self.ended = True                           # output closed: it is gone
-            if line and line.startswith("ERR"):         # why it exited, when no request read it
-                self.last_err = line[4:].strip()
-        lines.put(None)
-        for q in slot_q:
-            q.put(None)
+            lines.put(None)                             # every waiting request sees the end, whatever ended the pump
+            for q in slot_q:
+                q.put(None)
+            cv = getattr(self, "slot_cv", None)
+            if cv is not None:
+                with cv:                                # requests waiting for a slot or the control lines
+                    cv.notify_all()
 
     def death_note(self) -> str:
         """Why the engine most likely ended, from the end of its log: its own watchdog, else RAM."""
         if getattr(self, "silent_note", None):          # the server ended it
             return self.silent_note
+        if getattr(self, "pump_note", None):            # its output could not be trusted
+            return self.pump_note
         tail = ""
         try:
             with open(self.log_path, "rb") as f:
