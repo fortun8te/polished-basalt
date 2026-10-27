@@ -40,6 +40,16 @@ void fill(std::vector<uint8_t>& v, int type, uint64_t seed, int mode) {
 
 int failures = 0;
 
+bool same_outputs(const std::vector<float>& a, const std::vector<float>& b, size_t written) {
+    return std::memcmp(a.data(), b.data(), written * sizeof(float)) == 0;
+}
+
+bool tail_intact(const std::vector<float>& values, size_t written, float sentinel) {
+    for (size_t i = written; i < values.size(); ++i)
+        if (std::memcmp(&values[i], &sentinel, sizeof(float)) != 0) return false;
+    return true;
+}
+
 void run(int type, int mode, uint64_t seed) {
     const size_t row = ggml_row_size((ggml_type) type, N);
     std::vector<uint8_t> w(2 * ROWS * row);
@@ -65,11 +75,15 @@ void run(int type, int mode, uint64_t seed) {
         cpu::iq512_gu_rows_signs(true, type, w.data(), row, ROWS * row, N, a, nt, f1, 0, ROWS);
         cpu::iq512_rows_signs(false, type, w.data(), row, N, a, nt, p0, 0, ROWS);
         cpu::iq512_rows_signs(true, type, w.data(), row, N, a, nt, p1, 0, ROWS);
-        const bool same_gu = std::memcmp(ff0.data(), ff1.data(), ff0.size() * sizeof(float)) == 0;
-        const bool same_dot = std::memcmp(o0.data(), o1.data(), o0.size() * sizeof(float)) == 0;
-        if (!same_gu || !same_dot) {
-            std::printf("type %d mode %d nt %d: gate/up %s, dot %s   <-- WRONG\n", type, mode, nt, same_gu ? "same" : "DIFFERENT",
-                        same_dot ? "same" : "DIFFERENT");
+        const size_t written = (size_t) nt * ROWS;
+        const bool same_gu = same_outputs(ff0, ff1, written);
+        const bool same_dot = same_outputs(o0, o1, written);
+        const bool tails_ok = tail_intact(ff0, written, -1.f) && tail_intact(ff1, written, -2.f) &&
+                              tail_intact(o0, written, -1.f) && tail_intact(o1, written, -2.f);
+        if (!same_gu || !same_dot || !tails_ok) {
+            std::printf("type %d mode %d nt %d: gate/up %s, dot %s, unused tails %s   <-- WRONG\n",
+                        type, mode, nt, same_gu ? "same" : "DIFFERENT", same_dot ? "same" : "DIFFERENT",
+                        tails_ok ? "intact" : "CLOBBERED");
             failures = 1;
         }
     }
