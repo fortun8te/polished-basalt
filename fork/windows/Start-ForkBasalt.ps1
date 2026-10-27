@@ -1,34 +1,29 @@
 <#
- Start the rtx5080-win fork on its OWN port (18892) with a chosen profile arm, for A/B runs.
- It never stops or replaces the production server. It refuses to start while anything answers on 18891
- or 18892, or while the GPU has less than 14 GiB free (one 16 GB model at a time).
- Kill switches: pass -Disable a,b,c to set BASALT_FORK_<NAME>=0 for each name (see fork/FORK.md for names).
- Usage: .\Start-ForkBasalt.ps1 -Profile a1-ple-ram [-Disable pdep,staging]
+ Start the fork on its arm's own port, only when the files on disk are the candidate that Build-Fork.cmd recorded.
+ Every check and the launch itself are in fork/tools/fork_launch.py; this wrapper only locates Python and CUDA.
+ It refuses, and starts nothing, unless: the engine (bin\basalt.exe in the source tree), the source commit and tree,
+ the arm's profile and the model files match fork-identity.json; nothing listens on 18891 or on any arm's port; and
+ 14 GiB of GPU memory are free. Logs, the receipt and every file the engine writes go to fork-runs\<arm>\<time>\.
+ Switches (BASALT_FORK_<NAME>; the caller's own BASALT_FORK_* are never inherited):
+   -Disable STAGING,PDEP_SIGNS   set to 0 (on by default; names in docs/fork.md and docs/polished-basalt/PATCHES.md)
+   -Enable GDN_REC2              set to 1 (off by default)
+   -Number DRAFT_CUM_MULT=1.2    a number switch
+ -QuickModels checks model files by size and time instead of sha256. -WaitSeconds N waits for /health.
+ Usage: .\Start-ForkBasalt.ps1 -Profile a1-ple-ram [-Disable staging] [-WaitSeconds 600]
 #>
 param(
-  [Parameter(Mandatory)][ValidateSet('a0-daily-control','a1-ple-ram','a2-adapt-slow','a3-reserve-lean')][string]$Profile,
-  [string[]]$Disable = @()
+  [Parameter(Mandatory)][string]$Profile,
+  [string[]]$Disable = @(), [string[]]$Enable = @(), [string[]]$Number = @(),
+  [int]$WaitSeconds = 0, [switch]$QuickModels
 )
 $ErrorActionPreference = 'Stop'
-$task = 'C:/Users/pc-agent/AgentWorkspace/local-ai-20261026'
-$fork = 'C:/Users/pc-agent/AgentWorkspace/basalt-5080'
-foreach ($port in 18891, 18892) {
-  try { Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 2 | Out-Null; throw "Port $port answers; stop that server first. Nothing was stopped." }
-  catch [System.Net.WebException] { if ($_.Exception.Response) { throw "Port $port is occupied. Nothing was stopped." } }
-}
-$free = [int](& nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | Select-Object -First 1)
-if ($free -lt 14336) { throw "Only $free MiB of GPU memory is free; another model is loaded. Nothing was started." }
-$profilePath = "$fork/src/fork/profiles/$Profile.json"
-$python = "$task/../ai200-20261026/.venv/Scripts/python.exe"
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$python = 'C:/Users/pc-agent/AgentWorkspace/ai200-20261026/.venv/Scripts/python.exe'
 $cuda = 'C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1'
-$env:PATH = "$cuda/bin;$cuda/bin/x64;" + $env:PATH
-$env:HF_HUB_OFFLINE = '1'; $env:PYTHONNOUSERSITE = '1'
-foreach ($name in $Disable) { Set-Item -Path "Env:BASALT_FORK_$($name.ToUpper())" -Value '0' }
-$log = "$fork/logs"; New-Item -ItemType Directory -Force -Path $log | Out-Null
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$argsList = @('-u', '-m', 'serve.server', '--engine-bin', "$fork/build/bin/basalt.exe", '--config', $profilePath)
-$p = Start-Process -FilePath $python -ArgumentList $argsList -WorkingDirectory "$fork/src" -NoNewWindow -PassThru `
-  -RedirectStandardOutput "$log/$Profile-$stamp.out.log" -RedirectStandardError "$log/$Profile-$stamp.err.log"
-[ordered]@{ pid = $p.Id; profile = $Profile; disabled = $Disable; startUtc = $p.StartTime.ToUniversalTime().ToString('o') } |
-  ConvertTo-Json | Set-Content "$fork/current-fork-server.json"
-Write-Output "Fork Basalt starting on port 18892 with profile $Profile. Logs: $log"
+$argv = @("$root/fork/tools/fork_launch.py", 'start', '--root', $root, '--arm', $Profile, '--cuda-path', $cuda, '--wait', $WaitSeconds)
+if ($QuickModels) { $argv += @('--models', 'stat') }
+foreach ($n in $Disable) { $argv += @('--disable', $n) }
+foreach ($n in $Enable) { $argv += @('--enable', $n) }
+foreach ($n in $Number) { $argv += @('--set', $n) }
+& $python @argv
+exit $LASTEXITCODE
