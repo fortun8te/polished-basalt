@@ -17,14 +17,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
 import time
-import urllib.error
 import urllib.request
 
-# fixed checkpoint commit so every install reads the same tensors; --revision overrides it, and resolve_repo falls
-# back to the current files with a message when the commit is gone
+# Fixed checkpoint commit; --revision explicitly selects an unchecked alternative.
 PINNED_REVISION = "de4b8e4d43b917e7706784d8bb445c9af86a3540"
 REVISION = PINNED_REVISION
 # HF_ENDPOINT may name a mirror; the SHA256 checks still apply
@@ -144,23 +143,6 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def resolve_repo():
-    """REPO, or the repository's current files when the pinned revision is gone from it (a 404 on its index)."""
-    global REPO
-    try:
-        req = urllib.request.Request(REPO + "model.safetensors.index.json", method="HEAD",
-                                     headers={"User-Agent": "mtp-fetch"})
-        urllib.request.urlopen(req, timeout=120).close()
-    except urllib.error.HTTPError as e:
-        if e.code == 404 and "/resolve/main/" not in REPO:
-            print("the checkpoint's pinned revision %s is gone: reading its current files (main)" % REVISION,
-                  file=sys.stderr)
-            REPO = REPO.replace("/resolve/%s/" % REVISION, "/resolve/main/")
-    except OSError:
-        pass                                        # get() retries and reports it
-    return REPO
-
-
 def shard_header(shard):
     url = REPO + shard
     n = struct.unpack("<Q", get(url, 0, 7))[0]
@@ -168,9 +150,23 @@ def shard_header(shard):
     return 8 + n, header
 
 
+def check_inventory_names(rows):
+    names = [r["name"] for r in rows]
+    if any(not isinstance(n, str) or not re.fullmatch(r"mtp\.[A-Za-z0-9_.-]+", n) for n in names):
+        raise ValueError("invalid MTP tensor name")
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate MTP tensor names")
+    if pinned() and set(names) != set(SHA256):
+        raise ValueError("pinned inventory does not match the expected tensor names")
+    if any(not isinstance(r["shard"], str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", r["shard"])
+           or r["shard"] in (".", "..") for r in rows):
+        raise ValueError("invalid shard name")
+
+
 def inventory(out):
     index = json.loads(get(REPO + "model.safetensors.index.json"))["weight_map"]
     mtp = {k: v for k, v in index.items() if k.startswith("mtp.")}
+    check_inventory_names([{"name": name, "shard": shard} for name, shard in mtp.items()])
     rows, total = [], 0
     for shard in sorted(set(mtp.values())):
         base, header = shard_header(shard)
@@ -211,6 +207,7 @@ def fetch(out, only):
     # byte ranges belong to one revision: an inventory from another repository or revision is read again
     same = isinstance(inv, dict) and inv.get("repo") == REPO
     rows = inv["tensors"] if same else inventory(out)
+    check_inventory_names(rows)
     os.makedirs(tdir, exist_ok=True)
     manifest = []
     chunk = 64 << 20
@@ -298,7 +295,6 @@ def main():
         for name in bad:
             print("MTP tensor missing or corrupt: %s" % name, file=sys.stderr)
         sys.exit(BAD if bad else 0)
-    resolve_repo()
     inventory(a.out) if a.cmd == "inventory" else fetch(a.out, a.only)
 
 

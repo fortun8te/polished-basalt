@@ -18,6 +18,48 @@ from serve.util.text import ByteTokenizer
 TEMPLATE = Path(__file__).resolve().parents[1] / "chat_template.jinja"
 
 
+class JobThread(threading.Thread):
+    def __init__(self, target):
+        super().__init__(daemon=True)
+        self.job = target
+        self.error = None
+
+    def run(self):
+        try:
+            self.job()
+        except BaseException as exc:
+            self.error = exc
+
+    def join(self, timeout=None):
+        super().join(timeout)
+        if self.is_alive():
+            raise AssertionError("background job did not finish")
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+
+
+class JobThreadTests(unittest.TestCase):
+    def test_worker_exception_is_reported_on_join(self):
+        def fail():
+            raise ValueError("worker failed")
+        t = JobThread(fail)
+        t.start()
+        with self.assertRaisesRegex(ValueError, "worker failed"):
+            t.join(2)
+
+    def test_unfinished_worker_is_reported(self):
+        release = threading.Event()
+        t = JobThread(release.wait)
+        t.start()
+        try:
+            with self.assertRaisesRegex(AssertionError, "did not finish"):
+                t.join(0.01)
+        finally:
+            release.set()
+            t.join(2)
+
+
 class Slots(unittest.TestCase):
     """A server over MockEngine(batch=N); each script is chosen by the first word of the user's message."""
     N = 2
@@ -54,9 +96,10 @@ class Slots(unittest.TestCase):
         res = [None] * len(jobs)
         def go(i, f):
             res[i] = f()
-        ts = [threading.Thread(target=go, args=(i, f)) for i, f in enumerate(jobs)]
+        ts = [JobThread(lambda i=i, f=f: go(i, f)) for i, f in enumerate(jobs)]
         for t in ts:
             t.start()
+            self.addCleanup(t.join, 20)
         return ts, res
 
     def wait_for(self, cond, what, timeout=5.0):
@@ -180,7 +223,7 @@ class SlotRows(Slots):
             t.join(20)
 
     def test_a_slot_reads_before_it_decodes(self):
-        self.start({"go": "word " * 5}, delay=0.4)
+        self.start({"go": "ok"}, delay=0.4)
         ts, _ = self.run_all([lambda: self.chat("go slowly")])
         reading = self.busy_rows(1, "one slot busy")[0]
         self.assertEqual((reading["state"], reading["generated"]), ("prefill", 0))
@@ -202,7 +245,7 @@ class SlotRows(Slots):
         self.assertEqual(self.get("/slots")[(slot + 1) % 3]["drafts_offered"], None)
 
     def test_waiting_requests_are_listed_oldest_first(self):
-        self.start({"go": "word " * 60}, n=2, delay=0.05)
+        self.start({"go": "word " * 60}, n=2, delay=0.02)
         ts = []
         for i, kind in enumerate(("openai", "anthropic", "openai", "anthropic")):
             job = (lambda i=i: self.chat(f"go {i}", model="qwen3.8-flash-next")) if kind == "openai" else \
