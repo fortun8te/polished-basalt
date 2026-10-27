@@ -1040,6 +1040,7 @@ basalt_gpu_test(NAME cuda_device_selftest COMMAND basalt-device --selftest)
 # speculation components that need no GPU.
 add_library(spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp src/spec/draft_policy.cpp)
 target_include_directories(spec PUBLIC include)
+target_link_libraries(spec PUBLIC platform)   # the BASALT_FORK_<NAME> switches
 if(BUILD_TESTING)
   add_executable(suffix_drafter_test tests/spec/suffix_drafter_test.cpp)
   target_link_libraries(suffix_drafter_test PRIVATE spec)
