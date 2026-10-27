@@ -1,0 +1,20 @@
+{
+  "server": {
+    "model": "models/Qwen3.8-FN-GSQ-RCO-IQ3_S.basalt",
+    "gpu": "0",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "parallel": 2,
+    "vision": "off"
+  },
+  "engine": {
+    "max-context": 131072,
+    "kv": "int8",
+    "resident-experts": true,
+    "vram-reserve-mib": 500,
+    "prompt-cache": 8,
+    "prompt-cache-root": 2048,
+    "conversation-cache-mib": 8192,
+    "expert-profile-save": "profiles/my-workload.profile"
+  }
+}
