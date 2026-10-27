@@ -42,6 +42,13 @@ int main() {
     check(w.waiting <= w.threads, "threads_in_disk_wait counts waiting within all");
     if (!mi.empty()) check(w.threads >= 1, "and lists this process's threads");
 
+    // set_env keeps a value that is already there, so each name is set once
+    set_env("BASALT_FORK_SYSTEM_TEST_OFF", "0");
+    set_env("BASALT_FORK_SYSTEM_TEST_ON", "1");
+    check(!fork_switch("SYSTEM_TEST_OFF"), "fork_switch is off when the variable is 0");
+    check(fork_switch("SYSTEM_TEST_ON"), "and on when it is 1");
+    check(fork_switch("SYSTEM_TEST_UNSET"), "and on when it is not set");
+
     (void) gpu_peer_access();
     const DynLib nvml = DynLib::open_nvml();
     if (nvml) {
