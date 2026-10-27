@@ -21,7 +21,7 @@ from serve.api.logit_bias import REQUEST_KEY as BIAS_KEY, checked as checked_bia
 from serve.frontend import anthropic_to_messages, forced_call, openai_to_messages
 from serve.api.openai import openai_chunks, openai_collect
 from serve.api.responses import ResponsesError
-from serve.prompt import primed
+from serve.prompt import primed, tokens_known
 from serve.security import host_allowed, host_names_for, key_matches, origin_allowed
 from serve.service import LOG_FIRST_LINES, LOG_MAX_LINES, Service, _debug_req
 from serve.api.structured import anthropic_format, check_format
@@ -30,6 +30,10 @@ from serve.util.text import stop_strings
 
 BODY_MAX = 256 << 20                        # the most a JSON request body may hold (read into memory)
 CONTROL_BODY_MAX = 64 << 10                 # the unused body of /load and /unload
+CHUNK_MAX = 65536                           # bound chunk framing and per-chunk work
+HEADER_DEADLINE = 30.0
+BODY_DEADLINE = 300.0
+HANDLER_MAX = 128
 
 
 class BadBody(Exception):
@@ -44,11 +48,76 @@ def _size_text(n: int) -> str:
     return f"{n >> 20} MiB" if n >= 1 << 20 else f"{n >> 10} KiB"
 
 
+def _stream_primed(events, prompt):
+    """Keep early context errors as HTTP errors, but start a stream at the first queue heartbeat."""
+    if tokens_known(prompt):
+        return events
+    held, later = [], None
+    try:
+        while not tokens_known(prompt):
+            item = next(events)
+            held.append(item)
+            if item is None:
+                break
+    except StopIteration:
+        pass
+    except ValueError:
+        events.close()
+        raise
+    except BaseException as e:
+        later = e
+
+    def replay():
+        try:
+            yield from held
+            if later is not None:
+                raise later
+            yield from events
+        finally:
+            events.close()
+    return replay()
+
+
 def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
         watch_done = None                                   # stops this request's disconnect watcher
+
+        def _deadline(self, seconds):
+            with self._deadline_lock:
+                if self._deadline_timer is not None:
+                    self._deadline_timer.cancel()
+                self._deadline_token += 1
+                token = self._deadline_token
+                self._deadline_timer = None
+                expired = self._deadline_expired
+                if seconds is not None:
+                    self._deadline_expired = False
+                    def expire():
+                        with self._deadline_lock:
+                            if self._deadline_token == token:
+                                self._deadline_expired = True
+                                try:
+                                    self.connection.shutdown(socket.SHUT_RDWR)
+                                except OSError:
+                                    pass
+                    timer = threading.Timer(seconds, expire)
+                    timer.daemon = True
+                    self._deadline_timer = timer
+                    timer.start()
+                return expired
+
+        def handle_one_request(self):
+            self._deadline_lock = threading.Lock()
+            self._deadline_timer = None
+            self._deadline_token = 0
+            self._deadline_expired = False
+            self._deadline(HEADER_DEADLINE)
+            try:
+                super().handle_one_request()
+            finally:
+                self._deadline(None)
 
         def log_message(self, fmt, *args):
             pass
@@ -57,6 +126,10 @@ def make_handler(svc: Service):
             """Without an API key, check the Host header (DNS-rebinding protection); a key makes the check moot."""
             if not super().parse_request():
                 return False
+            if self._deadline(None):
+                return False
+            if self.command == "POST":
+                self._deadline(BODY_DEADLINE)
             host = self.headers.get("Host")
             if svc.api_key or host_allowed(host, svc.host_names, "*" in svc.allowed_hosts):
                 return True
@@ -77,7 +150,7 @@ def make_handler(svc: Service):
         def _read_chunked(self, limit: int, keep: bool = True) -> bytes:
             """Decode a chunked body: at most `limit` bytes (413 beyond it; the size is checked before a chunk is
             read, so a huge announced chunk is never allocated), 400 for a malformed one. keep=False drops it."""
-            parts, total = [], 0
+            parts, total, chunks = bytearray(), 0, 0
             while True:
                 line = self.rfile.readline(1025)
                 if not line.endswith(b"\n"):
@@ -92,7 +165,11 @@ def make_handler(svc: Service):
                     for _ in range(64):                       # the trailers, up to the blank line
                         if self.rfile.readline(8193).strip() == b"":
                             break
-                    return b"".join(parts)
+                    return bytes(parts)
+                chunks += 1
+                if chunks > CHUNK_MAX:
+                    self.close_connection = True
+                    raise BadBody(413, "too many chunks in the request body")
                 total += size
                 if total > limit:
                     self.close_connection = True
@@ -104,11 +181,20 @@ def make_handler(svc: Service):
                         raise BadBody(400, "the chunked request body ended early")
                     left -= len(piece)
                     if keep:
-                        parts.append(piece)
+                        parts.extend(piece)
                 if self.rfile.read(2) != b"\r\n":
                     raise BadBody(400, "malformed chunked request body")
 
         def _body(self) -> bytes:
+            try:
+                body = self._body_read()
+            finally:
+                expired = self._deadline(None)
+            if expired:
+                raise BadBody(408, "request body deadline exceeded")
+            return body
+
+        def _body_read(self) -> bytes:
             """The request body, chunked or by Content-Length, at most BODY_MAX bytes."""
             limit = BODY_MAX
             if self._chunked():
@@ -122,7 +208,10 @@ def make_handler(svc: Service):
             if length > limit:
                 self.close_connection = True
                 raise BadBody(413, f"the request body is larger than {_size_text(limit)}")
-            return self.rfile.read(length)
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise BadBody(400, "the request body ended early")
+            return body
 
         def _foreign_page(self) -> bool:
             """Without an API key, refuse a /v1 POST from another site's page: its Origin must be allowed (no Origin
@@ -339,7 +428,10 @@ def make_handler(svc: Service):
                     self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                 return
             try:
-                req = json.loads(self._body() or b"{}")
+                try:
+                    req = json.loads(self._body() or b"{}")
+                except RecursionError:
+                    raise ValueError("JSON is nested too deeply") from None
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
                 if path.startswith("/v1/responses/"):        # nothing is stored
@@ -381,6 +473,34 @@ def make_handler(svc: Service):
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
+                if path == "/v1/chat/completions":
+                    kwargs = req.get("chat_template_kwargs")
+                    if kwargs is not None and not isinstance(kwargs, dict):
+                        raise ValueError("chat_template_kwargs must be an object")
+                if path in ("/v1/messages", "/v1/messages/count_tokens"):
+                    messages = req.get("messages")
+                    if isinstance(messages, list):
+                        for message in messages:
+                            if not isinstance(message, dict):
+                                continue
+                            content = message.get("content")
+                            if content is not None and not isinstance(content, (str, list)):
+                                raise ValueError("message content must be text or a list of objects")
+                            if isinstance(content, list):
+                                if not all(isinstance(x, dict) for x in content):
+                                    raise ValueError("message content must be text or a list of objects")
+                                for block in content:
+                                    field = block.get("type") if block.get("type") in ("text", "thinking") else None
+                                    if field and not isinstance(block.get(field, ""), str):
+                                        raise ValueError(f"message content {field} must be text")
+                            if "role" not in message:
+                                raise ValueError("message role is required")
+                for key in ("max_tokens", "max_completion_tokens"):
+                    if path in ("/v1/chat/completions", "/v1/messages") and req.get(key) is not None:
+                        try:
+                            int(req[key])
+                        except (ValueError, TypeError, OverflowError):
+                            raise ValueError(f"{key} must be an integer") from None
                 requested = req.get("model")
                 if not (isinstance(requested, str) and requested in svc.served_names()):
                     self._unknown_model(path, requested)
@@ -472,6 +592,9 @@ def make_handler(svc: Service):
                 complete = False
             finally:
                 self.connection.settimeout(timeout)
+                expired = self._deadline(None)
+            if expired:
+                return False
             if not complete:
                 self._json(400, {"error": {"message": "incomplete control request body"}})
             return complete
@@ -541,7 +664,8 @@ def make_handler(svc: Service):
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             self._watch_client(cancel)
-            chunks = primed(openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, force=force), ids)
+            chunks = (_stream_primed if req.get("stream") else primed)(
+                openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, force=force), ids)
             if not req.get("stream"):
                 return self._json(200, openai_collect(chunks))
             self._sse()
@@ -589,7 +713,7 @@ def make_handler(svc: Service):
                 if done is not None and done["finish"] != "cancel" and not cancel.is_set():
                     yield from asm.finish(done)
             try:
-                items = primed(events(), ids)
+                items = (_stream_primed if req.get("stream") else primed)(events(), ids)
             except ValueError as e:                          # too long for the context: found when the engine counted
                 err = ResponsesError(str(e), "input", "context_length_exceeded" if "context" in str(e) else None)
                 return self._json(err.status, err.body())
@@ -712,7 +836,8 @@ def make_handler(svc: Service):
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             self._watch_client(cancel)
-            events = primed(anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force), ids)
+            events = (_stream_primed if req.get("stream") else primed)(
+                anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force), ids)
             if not req.get("stream"):
                 return self._json(200, anthropic_collect(events))
             self._sse()
@@ -741,6 +866,26 @@ def make_handler(svc: Service):
 class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 256      # socketserver's backlog of 5 resets some clients of a burst of simultaneous connections
+
+    def __init__(self, *args, **kwargs):
+        self._handler_slots = threading.BoundedSemaphore(HANDLER_MAX)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._handler_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._handler_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._handler_slots.release()
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a hang-up needs no stack trace
