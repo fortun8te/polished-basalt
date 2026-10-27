@@ -1,7 +1,8 @@
 # Launch profiles
 
-All profiles are in `fork/profiles/`. The `a*` arms are the A/B ladder for the 5080 PC (see `TEST_PLAN.md`); `b0` is a
-generic starting point supplied from another review. Paths in the `a*` files are placeholders for the Windows machine; edit the
+Runnable profiles are in `fork/profiles/`. The `a*` arms are the A/B ladder for the 5080 PC (see `TEST_PLAN.md`).
+The unconfigured `b0` example is in `fork/examples/`, outside build-time model validation. It is a generic starting point
+supplied from another review. Paths in the `a*` files are placeholders for the Windows machine; edit the
 `model` and `ple-gguf` paths before use.
 
 | File | Port | Context | Slots | What it is for |
