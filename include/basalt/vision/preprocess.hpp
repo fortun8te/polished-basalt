@@ -36,12 +36,19 @@ struct Size {
 /// camera's full-resolution photo.
 inline constexpr int64_t kMaxImagePixels = 64ll << 20;
 
+/// The longest side one image may have.  The pixel budget alone admits a picture one pixel wide and 64 Mi tall, whose
+/// resample would still allocate along that length.
+inline constexpr int kMaxImageSide = 32768;
+
 /// JPEG, PNG, BMP or GIF (first frame) from memory, three channels (alpha dropped).  False on a bad image, or on
-/// one whose header claims more than `max_pixels` - checked before any pixel buffer is allocated.
+/// one whose header claims more than `max_pixels` or a side past `kMaxImageSide` - checked before any pixel buffer
+/// is allocated.
 bool decode_image(const uint8_t* data, size_t len, Image& out, std::string& err,
                   int64_t max_pixels = kMaxImagePixels);
 
-/// The canvas size for a w x h picture: a multiple of patch * merge, within [min_tokens, max_tokens] merged tokens.
+/// The canvas size for a w x h picture: a multiple of patch * merge on each side, within [min_tokens, max_tokens]
+/// merged tokens however thin the picture is.  {0, 0} for a picture with no pixels or a geometry that has no such
+/// size (a non-positive field, min_tokens past max_tokens, a side that does not fit an int).
 Size fit_size(int w, int h, const Geometry& g);
 
 /// The picture on a `target` canvas: scaled to fit (never beyond the canvas), centred, black elsewhere.
