@@ -21,10 +21,10 @@ struct CpuWarm {
                               ///< and value i + 16 in its high nibble, each the code plus 8
     std::vector<float> rs;    ///< [n_layers][n_expert][n_embd / 32]
     int n_expert = 0, n_embd = 0, k = 0;
-    size_t bytes = 0, down_off = 0;   ///< a blob's bytes, where its down rows start
     ExpertSource* src = nullptr;
     // the job in flight
     int layer = 0, n_tok = 0;
+    size_t bytes = 0, down_off = 0;                   ///< the layer's blob bytes, where its down rows start
     const uint8_t* xq = nullptr;                      ///< the ring's q8_1 rows, tokens back to back
     const int32_t* res0 = nullptr, *res1 = nullptr;   ///< the layer's CUDA0 / peer residency (res1 may be null)
     std::vector<float> logits;                        ///< [kVerifyMaxT][n_expert]

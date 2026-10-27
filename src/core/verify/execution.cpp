@@ -298,7 +298,10 @@ int Verifier::serve_poll(PoolMultiFn pool, void* user, std::string& err) {
         if (dm_ != nullptr && dm_->warm != nullptr && l + 1 < le_) {   // the next layer's warm-up
             CpuWarm& w = *dm_->warm;
             warm_pool_->idle_stop();
+            const basalt::kernels::cpu::NativeFmt& f = basalt::kernels::cpu::expert_layout().fmt[(size_t) (l + 1)];
             w.layer = (int) (l + 1);
+            w.bytes = f.bytes;
+            w.down_off = f.down_off;
             w.n_tok = std::min(n, (int) kVerifyMaxT);
             w.xq = dm_->h_xq + (size_t) k * dm_->xq_stride;
             w.res0 = dm_->shadow0.data() + (size_t) (l + 1) * g.n_expert;
