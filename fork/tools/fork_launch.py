@@ -188,7 +188,9 @@ def gpu_free_mib(run=subprocess.run):
 def http_ok(port: int, path: str = "/health") -> bool:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
-            return r.status == 200
+            value = json.load(r)
+            return (r.status == 200 and isinstance(value, dict)
+                    and value.get("service") == "basalt" and value.get("loaded") is True)
     except (OSError, urllib.error.URLError, ValueError):
         return False
 
@@ -235,7 +237,7 @@ def terminate(pid: int, grace_s: float = 30.0, run=subprocess.run) -> None:
     """Stop the process and its children: SIGTERM to the group (the server forwards a QUIT to the engine), then
     SIGKILL after grace_s; taskkill /T /F on Windows."""
     if os.name == "nt":
-        run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=60)
+        run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=60, check=True)
         return
     try:
         group = os.getpgid(pid)
@@ -284,7 +286,7 @@ def read_current(runs: Path):
 
 
 def running(rec, hooks) -> bool:
-    return bool(rec) and hooks.start_token(rec["pid"]) == rec.get("start_token")
+    return bool(rec and rec.get("start_token")) and hooks.start_token(rec["pid"]) == rec["start_token"]
 
 
 def start(root, arm: str, *, disable=(), enable=(), numbers=(), wait_s: float = 0.0, models: str = "full",
@@ -294,6 +296,8 @@ def start(root, arm: str, *, disable=(), enable=(), numbers=(), wait_s: float = 
     hooks = hooks or Hooks()
     root = Path(root).resolve()
     try:
+        if models != "full":
+            raise LaunchError("starting a candidate requires full model hashes; stat/skip are inspection modes only")
         names = arm_names(root)
         if arm not in names:
             raise LaunchError(f"unknown arm {arm!r}; known: {', '.join(names)}")
@@ -360,6 +364,10 @@ def start(root, arm: str, *, disable=(), enable=(), numbers=(), wait_s: float = 
                                    "started_utc": started, "candidate": manifest["id"]})
     say(f"fork server starting: arm {arm}, port {port}, pid {pid}, candidate {manifest['id']}")
     say(f"run directory {run_dir}")
+    if not token:
+        say("fork_launch: the server exited during start-up or its process identity could not be read; "
+            "receipt retained, readiness unverified")
+        return 2
     if wait_s <= 0:
         return 0
     end = time.time() + wait_s
@@ -391,6 +399,9 @@ def stop(root, runs_dir=None, hooks: Hooks | None = None, say=print) -> int:
     if rec is None:
         say("no fork server was recorded; nothing was stopped")
         return 0
+    if not rec.get("start_token"):
+        say("fork_launch: the receipt has no process identity; nothing was stopped, receipt retained")
+        return 1
     token = hooks.start_token(rec["pid"])
     if token is None:
         (runs / CURRENT).unlink(missing_ok=True)
@@ -400,7 +411,14 @@ def stop(root, runs_dir=None, hooks: Hooks | None = None, say=print) -> int:
         say(f"fork_launch: pid {rec['pid']} now belongs to another process (start {token}, recorded "
             f"{rec.get('start_token')}); nothing was stopped")
         return 1
-    hooks.terminate(rec["pid"])
+    try:
+        hooks.terminate(rec["pid"])
+    except (OSError, subprocess.SubprocessError) as error:
+        say(f"fork_launch: stop failed ({error}); receipt retained")
+        return 1
+    if hooks.start_token(rec["pid"]) == token:
+        say("fork_launch: the recorded server is still running; receipt retained")
+        return 1
     (runs / CURRENT).unlink(missing_ok=True)
     say(f"fork server stopped (pid {rec['pid']}, arm {rec['arm']})")
     return 0
@@ -461,8 +479,8 @@ def main(argv=None) -> int:
             p.add_argument("--enable", action="append", default=[], metavar="NAME,NAME", help="BASALT_FORK_<NAME>=1")
             p.add_argument("--set", action="append", default=[], metavar="NAME=NUMBER", dest="numbers")
             p.add_argument("--wait", type=float, default=0.0, metavar="SECONDS", help="wait for /health")
-            p.add_argument("--models", choices=("full", "stat", "skip"), default="full",
-                           help="how the model files are checked: sha256 (default), size and mtime, or not at all")
+            p.add_argument("--models", choices=("full",), default="full",
+                           help="require model SHA-256 checks before launch")
             p.add_argument("--min-free-mib", type=int, default=MIN_FREE_MIB)
             p.add_argument("--cuda-path")
             p.add_argument("--production-port", type=int, default=PRODUCTION_PORT)

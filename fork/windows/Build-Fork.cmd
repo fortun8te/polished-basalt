@@ -31,5 +31,5 @@ if errorlevel 1 exit /b %errorlevel%
   platform_compiler_test platform_cpu_test platform_system_test iq_avx2_test iq_signs_test iq_avx512_signs_test pool_native_test ^
   tokenizer_test dec_gdn_parity --parallel 4
 if errorlevel 1 exit /b %errorlevel%
-"%BASALT_PY%" "%FORK_SRC%\fork\tools\fork_identity.py" record --root "%FORK_SRC%" --build "%FORK_BUILD%" --reuse-model-hashes
+"%BASALT_PY%" "%FORK_SRC%\fork\tools\fork_identity.py" record --root "%FORK_SRC%" --build "%FORK_BUILD%"
 exit /b %errorlevel%
