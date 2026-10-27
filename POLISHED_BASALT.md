@@ -11,7 +11,7 @@ from [Strata](https://github.com/Niko1221/Strata)), tuned for one machine:
 | | |
 |---|---|
 | GPU | RTX 5080 16 GB (sm_120, 84 SMs, PCIe 5.0 x16) |
-| CPU | Ryzen 9 9800X3D (8 cores, AVX-512) |
+| CPU | Ryzen 7 9800X3D (8 cores, AVX-512) |
 | RAM | 128 GB DDR5 |
 | OS | Windows 11, native (WSL measured slower, see `docs/polished-basalt/WSL_VS_WINDOWS.md`) |
 | Model | Qwen3.8-Flash-Next GSQ-RCO IQ3_S, 256K context, full routing, high reasoning |
@@ -34,8 +34,8 @@ Every change is its own commit with provenance, a kill switch where it can drift
 
 - **Nothing has run on the 5080 PC.** Code was assembled, rebased, unit-tested where possible on a Mac (serve tests, scheduler tests,
   the pdep bit-identity proof) and read-checked. CUDA and Windows-specific code has not been compiled here.
-- Expected effect: about **+8–15 % decode** (115 → ~125–132 tok/s) and better prefill with `ple-io ram`; larger gains on time-to-answer
-  from caching and thinking control. See [`EXPECTED_GAINS.md`](docs/polished-basalt/EXPECTED_GAINS.md). It will not reach 200 tok/s.
+- **No combined speedup is measured.** The old 115 tok/s reference used thinking off and cannot support a high-reasoning
+  forecast. See [`EXPECTED_GAINS.md`](docs/polished-basalt/EXPECTED_GAINS.md) for separate workloads, evidence and limits.
 - Anything unproven is either opt-in (`BASALT_FORK_GDN_REC2=1`) or has a kill switch.
 
 ## Map
@@ -43,7 +43,7 @@ Every change is its own commit with provenance, a kill switch where it can drift
 | Path | What |
 |---|---|
 | `docs/polished-basalt/PATCHES.md` | every change, source, risk, kill switch |
-| `docs/polished-basalt/EXPECTED_GAINS.md` | estimates and why |
+| `docs/polished-basalt/EXPECTED_GAINS.md` | measured evidence, candidate benefits and limits |
 | `docs/polished-basalt/TEST_PLAN.md` | the ordered checklist to run on the PC |
 | `docs/polished-basalt/WSL_VS_WINDOWS.md` | why the Linux-in-Windows test was slower |
 | `docs/polished-basalt/RESEARCH.md` | what upstream issues/PRs, Strata and the community say |

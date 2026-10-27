@@ -10,15 +10,13 @@ on:
       - "tools/check_benchmarks.py"
       - ".github/workflows/pages.yml"
   push:
-    branches: [main]
+    branches: [main, polished-basalt]
     paths-ignore:
       - "docs/community/**"
       - "site/**"
       - "tools/check_benchmarks.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
-  schedule:
-    - cron: "17 5 * * *"   # keeps the compiler caches from expiring
 
 permissions:
   contents: read
@@ -52,7 +50,9 @@ jobs:
       - name: Server tests
         run: python -m pytest serve/tests -q -W error
       - name: Tool tests
-        run: python -m pytest tools/test_bench_flags.py tools/test_serve_launcher.py tools/test_tokenizer.py -q -W error
+        run: python -m pytest tools/test_bench_flags.py tools/test_serve_launcher.py tools/test_tokenizer.py tools/test_ppl_gate.py fork/tools tests/program/adaptive_transfer_failure_test.py -q -W error
+      - name: Scheduler tests
+        run: python -m pytest fork/scheduler/tests -q -W error
       - name: Converter tests
         run: python -m unittest discover -s tools/convert -p "test_*.py"
 

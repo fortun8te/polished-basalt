@@ -81,7 +81,20 @@ a near-tie can resolve differently (the precision page already allows this).
 `CONTRIBUTING.md` upstream forbids environment-variable switches, so none of this is suitable to send upstream as is; individual
 changes (PCIe staging, pdep, answer room) can be split and offered separately.
 
-## F. Credits
+## F. Continuation validation fixes
+
+| Area | Change | Validation boundary |
+|---|---|---|
+| Launch/identity | Recover the unfinished launcher; verify full identities, isolate arm flags, preserve archives, reject false readiness/stop success | Local dummy-process and file fixtures; real Windows launch remains separate |
+| Engine protocol | Reject truncated/malformed replies; preserve errors; reject cancelled or obsolete admissions; close owned log pipes | Real Python server with fake engines, not the target GPU |
+| Prompt boundaries | Preserve literal markers, structured arguments and leading instructions without breaking raw assistant replay | Text/tool/Responses fixtures |
+| Vision input | Bound file reads and conversion output; retain pixel/projector checks | Host fixtures and Pillow; vision remains off in daily profiles |
+| Draft recovery | Let no-draft windows relax the adaptive threshold | Host policy assertions; target numerical/quality validation still required |
+| CPU parity test | Compare written outputs and separately detect clobbered inactive slots | Host logic/syntax; actual AVX-512 execution remains required |
+| Quality gate | Reject missing, duplicate, malformed or mismatched rows and incomplete runs | Synthetic reference files and a fake engine; not a model-quality result |
+| Adaptive transfers | Fail closed on copy/event errors before further successful publication | Extracted host fault injection; full CUDA and hardware checks remain required |
+
+## G. Credits
 
 Patch authors: **tarhue** (Windows slice pinning, staging refinement), **arytek** (PCIe staging, answer room, #93),
 **mitalbert** (#85, #86), **Marco Muratori** and **oblq** (#89), **michmill1970** (#67), **dkaynarc** (#57 analysis). Basalt itself is

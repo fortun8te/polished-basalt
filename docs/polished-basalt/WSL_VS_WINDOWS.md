@@ -1,57 +1,38 @@
-# Why the WSL "Linux" test was slower than native Windows
+# Windows and WSL comparison
 
-Short version: the test was **WSL2, not Linux**. WSL2 runs Linux inside a virtual machine whose GPU access goes through a
-paravirtual layer. That layer, not Linux itself, costs speed for an engine that moves expert weights between RAM and the GPU
-thousands of times per second. A native Linux boot is expected to be equal to or better than Windows, but nobody has measured
-it on this PC.
+WSL2 runs Linux inside Windows. The recorded one-pass comparison was slower under WSL, so native Windows remains the
+accepted daily setup. That result does not establish a general Windows/Linux ranking or prove the cause of slower decode.
 
-## What was measured (Codex run, 27 Oct 2026, `linux-comparison-20261027`)
+## Recorded observations
 
-Same PC (RTX 5080, Ryzen 9 9800X3D, 128 GB), same saved requests, same weights, same 256K profile, `ple-io ram` on both.
+The same RTX 5080, Ryzen 7 9800X3D, full IQ3_S model, saved requests and configured 262144 window were used. Each of three coding
+requests stopped at 1024 output tokens before producing a final answer. Their reasoning and speculation differed.
 
-| Setup | Decode | Prefill (6.4K tokens) | Cold start |
-|---|---:|---:|---:|
-| Windows native, PLE in RAM | 87–101 tok/s (pooled 94.84) | 4,293–4,424 tok/s | 49 s |
-| WSL2, PLE in RAM | 77–90 tok/s (pooled 86.75) | 3,865–4,269 tok/s | 4 min 47 s |
-
-Engine counters were the same on both sides, which rules out "different work":
-
-| Counter | Windows | WSL2 |
+| Setup | Pooled output tokens/s | Cold start |
 |---|---:|---:|
-| Expert-cache hit rate | 70.8–78.6 % | 72.2–79.0 % |
-| MTP draft acceptance | 63–66 % | 58–68 % |
-| CPU expert-pool workers | 5 + host | 5 + host |
-| Expert RAM copy | 46.3 GiB page-locked | 46.2 GiB page-locked |
-| KV streaming | on (32768 resident) | on (99.5 % of reads hit VRAM) |
+| Native Windows, PLE in RAM | 94.84 | 48.7s |
+| WSL2, PLE in RAM | 86.75 | 287s |
 
-So the model did the same work and the same speculation; WSL2 simply moved bytes and launched kernels more slowly.
+Windows recorded roughly 46.3 GiB pinned expert memory; WSL recorded 46.2 GiB. KV streaming was active in both. A generic claim
+that WSL could pin only 1 GiB does not explain this run. Similar hit-rate or acceptance ranges do not prove equal computational
+work. There was one ordered pass, not alternating repeats or completed-task quality acceptance.
 
-## Evidence for each cause
+WSL startup included creating and checking a 28.8 GB memory snapshot through the Windows filesystem. This extra work confounds
+the cold-start comparison. It does not by itself establish why warm generation was slower.
 
-1. **Host-to-device copies are slower under WSL2.** Upstream Basalt issue #88 benchmarked one RTX 5090 + i7-13700K on both:
-   `h2d_gbps` 29.6 (WSL2) vs 40.9 (native Windows) on the same PCIe 5.0 x16 slot, DRAM bandwidth equal (60.7 vs 61.3 GB/s).
-   Decode was 126.4 vs 158.7 tok/s. Basalt streams experts and KV over exactly this path.
-2. **Page-locking is far slower in the guest.** In the Codex logs, locking the 46 GiB expert copy took **107 s on WSL2 vs 12 s on
-   Windows**. Pinned memory in a WSL2 guest has to be registered through the host's graphics kernel, so every pinned range
-   costs more and the driver may cap it (the Strata docs say WSL pins only ~1 GB and turns KV streaming off in some paths).
-3. **Kernel-launch and sync latency.** A decode window issues hundreds of small launches and waits on the CPU/GPU hand-off
-   (`GPU-reach wait`, ~6–11 ms of a ~26 ms window in upstream traces). Under GPU paravirtualization each launch and each
-   host-visible event costs extra microseconds. At 85–115 tok/s that adds up to single-digit percent.
-4. **Cold start.** The WSL arm read the model from `/mnt/c` (a network-style file bridge, 200–440 MB/s in the log) and built a
-   28.8 GB RAM snapshot first. This only affects startup, not decode.
-5. **Not the cause:** DRAM bandwidth (equal), expert hit rate (equal), draft acceptance (equal), swap (off), memory pressure
-   (no swap, ample headroom).
+## Hypotheses, not established causes
 
-## What this means
+GPU virtualization, copy throughput, launch/synchronization overhead, CPU scheduling and memory contention are plausible.
+Reports from other machines are not a profile of this one. Both systems pinned the observed allocation. No inference-time
+clock or transfer trace isolated the local cause.
 
-- WSL2 will not beat native Windows for this engine on this PC. Do not use it for speed.
-- Native Linux is a different question. It removes causes 1–4 and the Windows pinned-memory cap and EcoQoS issues, and gives
-  real hugepages. Upstream's own benchmarks are all native Linux (a 5080 + 9950X3D row reports 186.8 tok/s *aggregate* and
-  ~4,900 tok/s prefill, but that is a different CPU, a different benchmark and an aggregate figure).
-- The cheap way to know: boot a Linux live USB or a spare NVMe, copy the packs, run the same frozen requests with
-  `fork/windows/` equivalents. Expected result: 0–20 % decode, mostly prefill. If it is under 5 %, stay on Windows.
+Investigate with identical completed requests and alternating runs. Record exact builds, sampling, output lengths, actual
+context, CPU time, transfer bytes, GPU clocks/power and concurrent work. Separate cold loading, snapshot creation, prompt
+processing and generation. Storage placement is a separate experiment requiring sufficient disk headroom.
 
-## Caveats
+Native Linux has not been measured on this PC. It is a separate comparison, not an assumed upgrade or prerequisite. Do not
+change the user's OS or daily engine on the strength of unmatched community numbers.
 
-One ordered pass, not alternated A/B; the reasoning text differed across arms; sample sizes are 3 requests. The #88 numbers are
-from a different PC. Treat the ranking of causes as informed inference, not a profiled breakdown.
+Sources: [CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/index.html),
+[WSL filesystems](https://learn.microsoft.com/en-us/windows/wsl/filesystems),
+[Basalt Windows/WSL reports](https://github.com/jesdga95/basalt/issues/88).
