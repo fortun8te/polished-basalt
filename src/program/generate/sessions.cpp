@@ -4,6 +4,7 @@ namespace basalt::program::generate {
 
 int sessions(Context& context) {
     auto& o = *context.o;
+    auto& ple_path = *context.ple_path;
     auto& srcs = *context.srcs;
     auto& model_file = *context.model_file;
     auto& pack_files = *context.pack_files;
@@ -193,7 +194,7 @@ int sessions(Context& context) {
             return 1;
         }
         basalt::log::info("basalt generate", "PLE on, table %llu rows of %s",
-                     (unsigned long long) ple_table.rows(), o.model.c_str());
+                     (unsigned long long) ple_table.rows(), ple_path.c_str());
     }
     for (size_t i = 0; i < stages.size(); ++i) {
         GpuStage& st = *stages[i];

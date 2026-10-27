@@ -16,10 +16,21 @@ int run(int argc, char** argv) {
     if (const auto code = cli::prepare_model_process(o)) return *code;
     basalt::core::ModelSources srcs;
     basalt::core::ModelFile model_file;
+    basalt::core::ExternalPleContract external_ple;
+    std::unique_ptr<basalt::platform::VerifiedReadFile> ple_source_lease;
+    std::string ple_path = o.ple_gguf.empty() ? o.model : o.ple_gguf;
     {
         std::string merr;
         if (!model_file.open(o.model, merr) || !model_file.load_meta(merr) || !model_file.register_gguf_view(merr)) {
             return fatal_start_error("--model: " + merr);
+        }
+        if (!basalt::core::external_ple_contract(model_file.meta(), o.ple_gguf, external_ple, merr))
+            return fatal_start_error(merr);
+        if (external_ple.active) {
+            ple_source_lease = basalt::platform::verify_file_sha256(
+                ple_path, external_ple.source_file_sha256, merr);
+            if (!ple_source_lease) return fatal_start_error(merr);
+            ple_path = ple_source_lease->path();
         }
         basalt::core::model_sources(model_file, srcs);
         if (srcs.dense.empty() || srcs.dense_index.empty() || srcs.experts.empty() || srcs.experts_layout.empty() ||
@@ -196,14 +207,15 @@ int run(int argc, char** argv) {
     {
         // the source tensors hold the PLE table
         try {
-            const basalt::GgufModel model(o.native_shards);
-            if (model.find("per_layer_token_embd.weight") == nullptr) {
-                basalt::log::error("basalt generate", "%s has no per_layer_token_embd.weight", o.model.c_str());
-                return 2;
-            }
+            const basalt::GgufFile table(ple_path);
+            const auto* tensor = table.find("per_layer_token_embd.weight");
+            std::string err;
+            if (external_ple.active && !basalt::core::external_ple_tensor(
+                    external_ple, tensor, table.data_start(), table.file_size(), err))
+                return fatal_start_error(err);
+            if (tensor == nullptr) return fatal_start_error(ple_path + " has no per_layer_token_embd.weight");
         } catch (const std::exception& e) {
-            basalt::log::error("basalt generate", "%s: %s", o.model.c_str(), e.what());
-            return 2;
+            return fatal_start_error(ple_path + ": " + e.what());
         }
     }
     basalt::kernels::RopeScaling rope_cfg;
@@ -335,6 +347,7 @@ int run(int argc, char** argv) {
     context.no_spec = &no_spec;
     context.rope_cfg = &rope_cfg;
     context.err = &err;
+    context.ple_path = &ple_path;
     context.main_link_gbps = &main_link_gbps;
     return model(context);
 }

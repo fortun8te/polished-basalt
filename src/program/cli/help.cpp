@@ -19,6 +19,7 @@ void usage() {
                  "                       data/profiles\n"
                  "  --tokens LIST        the prompt as comma-separated token IDS (required)\n"
                  "  --tokens-file PATH   pretokenized prompt, commas or whitespace (alternative to --tokens)\n"
+                 "  --ple-gguf FILE      external original table required by a compact pack\n"
                  "  --ple-io direct|ram  n-gram table reads. direct (default): 4 KiB SSD\n"
                  "                       reads, the table stays out of the engine's memory; ram: mmap with the whole table locked in RAM at start\n"
                  "  --ple-row-cache N    bounded cache of fetched rows, 90 B each (default 1048576; 0 = off)\n"

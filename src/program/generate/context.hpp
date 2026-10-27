@@ -59,6 +59,7 @@ struct Context {
     void *const* main_cs = nullptr;
     basalt::core::Doorbell* db = nullptr;
     basalt::kernels::PleTable* ple_table = nullptr;
+    std::string* ple_path = nullptr;  // fork: --ple-gguf (external PLE table) or the model itself
     basalt::vision::CudaEncoder* vis_enc = nullptr;
     float ** d_parts = nullptr;
     std::vector<std::unique_ptr<GpuStage>>* stages = nullptr;

@@ -4,6 +4,7 @@ namespace basalt::program::generate {
 
 int vision(Context& context) {
     auto& o = *context.o;
+    auto& ple_path = *context.ple_path;
     auto& multi_gpu = *context.multi_gpu;
     auto& err = *context.err;
     auto& g = *context.g;
@@ -36,18 +37,18 @@ int vision(Context& context) {
             pio.keepalive_window_s = 60.0;
             if (pio.mode != basalt::kernels::PleIo::Direct) pio.keepalive_ms = 0;
         }
-        if (!ple_table.open(o.model, err, pio)) {
+        if (!ple_table.open(ple_path, err, pio)) {
             return fatal_start_error(err);
         }
         if (pio.mode == basalt::kernels::PleIo::Direct) {
             // --ple-io direct's random reads (up to --ple-inflight at once) are for SSDs; a rotational disk can take
             // longer than the stall watchdog's limit for one prompt chunk's rows.  Recommended, not forced.
             std::string dev;
-            if (basalt::platform::disk_rotational(o.model, dev) == 1)
+            if (basalt::platform::disk_rotational(ple_path, dev) == 1)
                 basalt::log::warn("basalt generate", "the n-gram table (%s) is on a rotational disk (%s): "
                                      "--ple-io direct reads it at random and can stall a prompt for minutes. "
                                      "--ple-io ram (it then needs RAM for the table) or the model on an SSD is "
-                                     "recommended", o.model.c_str(), dev.c_str());
+                                     "recommended", ple_path.c_str(), dev.c_str());
         }
         if (pio.lock)
             basalt::log::info("basalt generate", "PLE table %s (--ple-io ram) in %.1f s",
