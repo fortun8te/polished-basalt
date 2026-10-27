@@ -2817,6 +2817,39 @@ class ThinkingBudget(unittest.TestCase):
         msg = b["choices"][0]["message"]
         self.assertEqual((msg["content"], b["choices"][0]["finish_reason"]), ("The ", "stop"))
 
+    def test_answer_room_wraps_up_long_thinking_without_a_budget(self):
+        """From max_tokens 1024 on, thinking with no budget keeps the answer a quarter of the cap: 1024 - 512."""
+        from serve.service import REASONING_WRAP_UP
+        self.engine.THOUGHT = ThinkingEngine.THOUGHT * 4               # 736 reasoning tokens, more than the 512
+        code, b = self.openai(max_tokens=1024)
+        self.assertEqual(code, 200, b)
+        msg = b["choices"][0]["message"]
+        self.assertEqual(msg["reasoning_content"], self.engine.THOUGHT[:512] + REASONING_WRAP_UP.split("</think>")[0])
+        self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
+        self.assertEqual(b["choices"][0]["finish_reason"], "stop")
+
+    def test_answer_room_cuts_a_budget_at_or_near_max_tokens(self):
+        from serve.service import REASONING_WRAP_UP
+        self.engine.THOUGHT = ThinkingEngine.THOUGHT * 4
+        code, b = self.openai(max_tokens=1024, reasoning_budget_tokens=1000)
+        self.assertEqual(code, 200, b)
+        msg = b["choices"][0]["message"]
+        self.assertEqual(msg["reasoning_content"], self.engine.THOUGHT[:512] + REASONING_WRAP_UP.split("</think>")[0])
+        self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
+
+    def test_answer_room_off_and_below_its_cap(self):
+        self.engine.THOUGHT = ThinkingEngine.THOUGHT * 4
+        self.svc.answer_room = False                                   # --no-answer-room: thinks it all out
+        code, b = self.openai(max_tokens=1024)
+        self.assertEqual(code, 200, b)
+        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], self.engine.THOUGHT)
+        self.svc.answer_room = True                                    # below max_tokens 1024: left as it was
+        self.engine.THOUGHT = ThinkingEngine.THOUGHT
+        code, b = self.openai(max_tokens=400)
+        self.assertEqual(code, 200, b)
+        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
+        self.assertEqual(len(self.engine.prompts), 2)                  # one pass each, no wrap-up
+
     def test_anthropic_stream(self):
         from serve.service import REASONING_WRAP_UP
         code, raw = self.post("/v1/messages", {"model": "qwen3.8-flash-next", "max_tokens": 400, "stream": True,

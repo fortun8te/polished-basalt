@@ -34,6 +34,11 @@ VISION_START = "<|vision_start|>"
 REPEAT_STOP_TOKENS = 256
 # closes the thinking at reasoning_budget_tokens
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
+# the answer room (Strata 0.1.45 and #984): from this max_tokens on, thinking with no budget of its own, or with one at
+# or near max_tokens, is wrapped up early enough to leave the answer a quarter of the cap (at least ANSWER_RESERVE_MIN,
+# at most half); Service.answer_room, the server's --no-answer-room turns it off
+ANSWER_ROOM_MIN_CAP = 1024
+ANSWER_RESERVE_MIN = 512
 # closes the thinking when the model ends its turn inside it
 REASONING_CLOSE = "\n</think>\n\n"
 QUEUE_BEAT_S = 10.0         # a request waiting for the single turn sends a keep-alive this often
@@ -106,6 +111,7 @@ class Service:
         self.before_load = None
         self.vram_reserve = None                         # last POST /v1/vram reserve (None: the start's)
         self.reasoning_budget_tokens = 0                 # default thinking budget (0: none)
+        self.answer_room = True                          # see ANSWER_ROOM_MIN_CAP
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # see REPEAT_STOP_TOKENS
         self.anthropic_think_unasked = True               # "anthropic_thinking": "on_request" -> False
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
@@ -693,6 +699,15 @@ class Service:
         """Yield ("event", Event) as text arrives, ("ping", None) as heartbeat, then ("done", {...}).
         `force`: the opening of the call the reply must make (see prepare)."""
         budget = self.reasoning_budget(sampling) if thinking else None   # opt-in
+        if thinking and self.answer_room and max_new and max_new >= ANSWER_ROOM_MIN_CAP:
+            # max_tokens counts the thinking too: a client that caps every reply at 8192 and a task the model thinks
+            # long about got the cut-off in the middle of the thinking and no answer at all
+            room = max_new - min(max(ANSWER_RESERVE_MIN, max_new // 4), max_new // 2)
+            if budget is None or budget > room:
+                budget = room
+                if max_new <= 32768:
+                    print(f"[server] thinking limited to {room} of max_tokens {max_new} so the answer has room "
+                          "(--no-answer-room turns this off)", flush=True)
         if self.sampling_defaults:     # the request's own fields win
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**self.sampling_defaults, **req_values}
