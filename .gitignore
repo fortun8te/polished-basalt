@@ -15,6 +15,14 @@ __pycache__/
 /.ccache/
 .DS_Store
 
+# Candidate identity, binaries, model paths and local experiment receipts stay local.
+/fork-candidates/
+/fork-runs/
+/fork-identity.json
+/fork-source.json
+/fork-rollback.json
+.env
+
 # Local working notes for the Windows port: scratch planning, not project docs.
 docs/WINDOWS-ROADMAP.md
 docs/REBASE-PLAN.md

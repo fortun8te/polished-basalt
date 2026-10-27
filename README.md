@@ -1,47 +1,50 @@
-> <img src="assets/polished-basalt/polished-basalt-block.png" width="28" align="left"> **Polished Basalt** is a tuned fork of this engine for an RTX 5080 + Ryzen 9800X3D + Windows box (4 Basalt in a 2x2 → 4 Polished Basalt). See [POLISHED_BASALT.md](POLISHED_BASALT.md).
+# Polished Basalt
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/basalt-lockup-dark.png"><img src="assets/basalt-lockup-light.png" alt="Basalt" width="480"></picture></p>
+<p align="center"><img src="assets/polished-basalt/crafting-recipe.png" alt="Four Minecraft Basalt blocks craft into four Polished Basalt blocks" width="640"></p>
 
-Basalt is a local inference engine for the **Qwen3.8-Flash-Next** mixture-of-experts model.
-It runs on Linux and Windows with an NVIDIA Blackwell GPU (sm_120); see [platforms](docs/platforms.md) for limitations.
+A personal, experimental [Basalt](https://github.com/jesdga95/basalt) fork for an RTX 5080, Ryzen 7 9800X3D and 128 GB RAM.
+Basalt descends from [Strata](https://github.com/Niko1221/Strata). Both upstream projects and their contributors retain their
+credits and licences.
 
-Experts that do not fit in VRAM live in system RAM, and optionally on a second GPU used as a peer expert tier.
-A large MoE model runs on one workstation, behind an OpenAI- and Anthropic-compatible API.
+The target is full Qwen3.8-Flash-Next IQ3_S, high reasoning and a 262,144-token window on native Windows. The fork combines
+selected engine experiments with tested improvements to request handling, cancellation, input boundaries and test integrity.
 
-**Help wanted:** have some spare compute to lend for testing? See [Contributing](CONTRIBUTING.md#other-ways-to-help).
+**Status:** local host tests do not establish a Windows/CUDA build, target model quality or a measured speedup. The complete
+fork has not demonstrated 140 tokens/s under those conditions. Existing upstream benchmark numbers are not this fork's
+results. Keep the accepted daily setup until the target validation passes.
 
-<p align="center"><img src="docs/img/frontend.gif" alt="The Basalt web UI while a reply streams" width="720"></p>
+## Start here
 
-## Requirements
+- [Build, test and adjust on the PC](docs/polished-basalt/QUICKSTART.md)
+- [Ordered target validation](docs/polished-basalt/TEST_PLAN.md)
+- [What changed, provenance and switches](docs/polished-basalt/PATCHES.md)
+- [Evidence and limits](docs/polished-basalt/EXPECTED_GAINS.md)
+- [Windows versus WSL](docs/polished-basalt/WSL_VS_WINDOWS.md)
+- [Codex integration](docs/polished-basalt/CODEX_INTEGRATION.md)
+- [Upstream documentation](UPSTREAM_README.md)
 
-- Linux x86-64 with AVX2 (AVX-512 is used when present), and an NVIDIA Blackwell GPU (compute capability 12.0) with CUDA 13.
-- CMake 3.24 or newer, a C++20 compiler, and Python 3.10 or newer.
-- Enough system RAM to hold the experts that do not fit in VRAM.
+## Fast local checks
 
-## Quick start
-
-```sh
-git clone https://github.com/jesdga95/basalt && cd basalt
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j                  # bin/basalt, bin/basalt-bench, bin/basalt-probe, bin/basalt-vision
-pip install -r requirements.txt
-hf download jesdga/Qwen3.8-Flash-Next-Basalt Qwen3.8-FN-NVFP4.basalt --local-dir models
-```
-
-Put your settings in `basalt_config.json`, with `model` pointing at the downloaded file:
-
-```json
-{
-  "server": { "model": "models/Qwen3.8-FN-NVFP4.basalt", "gpu": "0,1", "port": 8080 },
-  "engine": { "expert-cache": "auto", "prefill": "auto", "kv": "int8", "resident-experts": true }
-}
-```
+With the repository's test dependencies and pytest installed:
 
 ```sh
-bin/basalt serve --config basalt_config.json
+python fork/tools/checks.py quick
+python fork/tools/checks.py full
 ```
 
-The server listens on 127.0.0.1 by default.
+These use local fake engines, fixtures and test servers. They do not contact the PC or load a model. The GPU and numerical
+quality gates are separate. GitHub CI runs on pushes, pull requests and manual dispatch; it compiles Linux and Windows CUDA
+code and runs host tests without a GPU. Do not interpret a green CI result as a model-speed benchmark.
+
+## Experiment controls
+
+The recovered launcher verifies source, binary, profile, model and process identity. Each profile has an isolated endpoint
+and run directory. Per-arm switches live only in the child environment. Startup refuses an occupied production/candidate
+port. Stop verifies the recorded process and reports failure rather than claiming an unsuccessful shutdown worked.
+
+Candidate manifests and rollback archives remain local and ignored by Git. A promotion plan prints differences; it does not
+replace the daily profile. Full model hashes can take time to verify. Build once per source change and reuse the frozen
+workloads and receipts for matched profile comparisons.
 
 ## Models
 
@@ -75,3 +78,5 @@ profile ships with the engine ([data/profiles](data/profiles)).
 ## License
 
 MIT, see [LICENSE](LICENSE).
+No weights, credentials, private transcripts or benchmark claims from an unrun experiment are distributed here. See
+[CONTRIBUTING.md](CONTRIBUTING.md), [LICENSE](LICENSE) and [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).

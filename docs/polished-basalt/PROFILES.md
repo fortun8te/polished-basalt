@@ -7,9 +7,9 @@ generic starting point supplied from another review. Paths in the `a*` files are
 | File | Port | Context | Slots | What it is for |
 |---|---:|---:|---:|---|
 | `a0-daily-control.json` | 18892 | 262,144 | 1 | Today's daily profile on the fork binary: the control arm |
-| `a1-ple-ram.json` | 18892 | 262,144 | 1 | a0 + `ple-io ram` (n-gram table locked in RAM) |
-| `a2-adapt-slow.json` | 18892 | 262,144 | 1 | a1 + `adapt-swaps 160`, `adapt-decay 0.97`, `adapt-every 1` |
-| `a3-reserve-lean.json` | 18892 | 262,144 | 1 | a2 + VRAM reserve 384 MiB and a saved expert profile |
+| `a1-ple-ram.json` | 18893 | 262,144 | 1 | a0 + `ple-io ram` (n-gram table locked in RAM) |
+| `a2-adapt-slow.json` | 18894 | 262,144 | 1 | a1 + `adapt-swaps 160`, `adapt-decay 0.97`, `adapt-every 1` |
+| `a3-reserve-lean.json` | 18895 | 262,144 | 1 | a2 + VRAM reserve 384 MiB and a saved expert profile |
 | `b0-agents-parallel2-128k.json` | 8080 | 131,072 | **2** | Generic agent profile from a separate review (see below) |
 
 ## b0: what to know before using it
