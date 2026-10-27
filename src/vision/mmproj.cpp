@@ -5,8 +5,10 @@
 #include "basalt/platform/memory.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace basalt::vision {
 
@@ -56,6 +58,10 @@ Value read_value(Cursor& c, uint32_t t) {
     if (t == 9) {
         const uint32_t et = c.get<uint32_t>();
         const uint64_t n = c.get<uint64_t>();
+        // Elements are scalars or strings, never arrays (a chain of nested arrays would recurse once per 12 bytes of
+        // file), and each takes at least its size in the file, so a count the rest of the file cannot hold is refused.
+        const size_t es = et == 8 ? sizeof(uint64_t) : scalar_size(et);
+        if (!c.ok || et == 9 || es == 0 || n > (uint64_t) (c.end - c.p) / es) { c.ok = false; return v; }
         for (uint64_t i = 0; c.ok && i < n; ++i) {
             const Value e = read_value(c, et);
             if (e.num && n <= 4096) v.arr.push_back(e.d);
@@ -77,7 +83,6 @@ Value read_value(Cursor& c, uint32_t t) {
         case 12: v.d = c.get<double>(); break;
         default: c.ok = false;
     }
-    (void) scalar_size;
     return v;
 }
 
@@ -94,9 +99,13 @@ void Mmproj::release() {
 Mmproj::~Mmproj() { release(); }
 
 bool Mmproj::open(const std::string& path, std::string& err) {
+    release();
+    err.clear();
     uint64_t file_bytes = 0;
     if (!platform::file_size(path, file_bytes)) { err = "cannot open " + path; return false; }
     if (file_bytes < 32) { err = "cannot read " + path; return false; }
+    if (file_bytes > std::numeric_limits<size_t>::max() - 4095 ||
+        file_bytes > (uint64_t) std::numeric_limits<ptrdiff_t>::max()) { err = "invalid projector size"; return false; }
     size_ = (size_t) file_bytes;
     // read whole with block-aligned unbuffered reads, so the file cache neither copies nor keeps it; a file system that
     // refuses them, and a platform with no unbuffered descriptor, is mapped instead
@@ -131,6 +140,10 @@ bool Mmproj::open(const std::string& path, std::string& err) {
     if (c.get<uint32_t>() != 0x46554747u) { err = path + " is not a GGUF file"; return false; }
     if (c.get<uint32_t>() != 3) { err = "unsupported GGUF version"; return false; }
     const uint64_t n_tensors = c.get<uint64_t>(), n_kv = c.get<uint64_t>();
+    // a tensor entry is at least 24 bytes and a metadata entry at least 12, after the 24-byte header
+    if (!c.ok || n_tensors > (size_ - 24) / 24 || n_kv > (size_ - 24) / 12) {
+        err = "invalid GGUF entry counts"; return false;
+    }
     std::map<std::string, Value> kv;
     std::string arch, proj_type;
     uint32_t align = 32;
@@ -158,14 +171,24 @@ bool Mmproj::open(const std::string& path, std::string& err) {
         }
         return it->second.d;
     };
-    hp_.image_size = (int) num("clip.vision.image_size", 0);
-    hp_.patch = (int) num("clip.vision.patch_size", 0);
-    hp_.embd = (int) num("clip.vision.embedding_length", 0);
-    hp_.ffn = (int) num("clip.vision.feed_forward_length", 0);
-    hp_.layers = (int) num("clip.vision.block_count", 0);
-    hp_.heads = (int) num("clip.vision.attention.head_count", 0);
-    hp_.merge = (int) num("clip.vision.spatial_merge_size", 2, false);
-    hp_.proj = (int) num("clip.vision.projection_dim", 0);
+    // a size, count or step of the encoder: a whole number of at least 1 that fits an int (the first error stays)
+    auto integer = [&](const char* k, int def, bool must = true) {
+        const double v = num(k, def, must);
+        if (!err.empty()) return 0;
+        if (!std::isfinite(v) || v < 1 || v > std::numeric_limits<int>::max() || std::floor(v) != v) {
+            err = std::string("invalid metadata ") + k;
+            return 0;
+        }
+        return (int) v;
+    };
+    hp_.image_size = integer("clip.vision.image_size", 0);
+    hp_.patch = integer("clip.vision.patch_size", 0);
+    hp_.embd = integer("clip.vision.embedding_length", 0);
+    hp_.ffn = integer("clip.vision.feed_forward_length", 0);
+    hp_.layers = integer("clip.vision.block_count", 0);
+    hp_.heads = integer("clip.vision.attention.head_count", 0);
+    hp_.merge = integer("clip.vision.spatial_merge_size", 2, false);
+    hp_.proj = integer("clip.vision.projection_dim", 0);
     hp_.eps = (float) num("clip.vision.attention.layer_norm_epsilon", 1e-6, false);
     if (!err.empty()) return false;
     for (const char* k : {"clip.vision.image_mean", "clip.vision.image_std"}) {
@@ -173,22 +196,37 @@ bool Mmproj::open(const std::string& path, std::string& err) {
         if (it == kv.end() || it->second.arr.size() != 3) { err = std::string("missing metadata ") + k; return false; }
         for (int i = 0; i < 3; ++i) (k[18] == 'm' ? hp_.mean : hp_.std)[i] = (float) it->second.arr[i];
     }
-    if (kv.count("general.alignment")) align = (uint32_t) kv["general.alignment"].d;
+    if (kv.count("general.alignment")) {
+        const Value& a = kv["general.alignment"];
+        if (!a.num || !std::isfinite(a.d) || a.d < 1 || a.d > 1048576 || std::floor(a.d) != a.d) {
+            err = "invalid GGUF alignment"; return false;
+        }
+        align = (uint32_t) a.d;
+    }
+    if ((align & (align - 1)) != 0) { err = "invalid GGUF alignment"; return false; }
     struct Info { std::string name; uint32_t type; std::vector<int64_t> ne; uint64_t off; };
     std::vector<Info> infos;
     for (uint64_t i = 0; c.ok && i < n_tensors; ++i) {
         Info t;
         t.name = c.str();
         const uint32_t nd = c.get<uint32_t>();
-        if (nd > 4) { err = "bad tensor rank"; return false; }
-        for (uint32_t d = 0; d < nd; ++d) t.ne.push_back((int64_t) c.get<uint64_t>());
+        if (nd == 0 || nd > 4) { err = "bad tensor rank"; return false; }
+        for (uint32_t d = 0; d < nd; ++d) {
+            const uint64_t dim = c.get<uint64_t>();
+            if (dim == 0 || dim > (uint64_t) std::numeric_limits<int64_t>::max()) {
+                err = "invalid tensor dimension"; return false;
+            }
+            t.ne.push_back((int64_t) dim);
+        }
         t.type = c.get<uint32_t>();
         t.off = c.get<uint64_t>();
         infos.push_back(std::move(t));
     }
     if (!c.ok) { err = "truncated GGUF tensor directory"; return false; }
     const size_t hdr = (size_t) (c.p - base);
+    if (align - 1 > std::numeric_limits<size_t>::max() - hdr) { err = "invalid GGUF data offset"; return false; }
     const size_t data0 = (hdr + align - 1) / align * align;
+    if (data0 > size_) { err = "invalid GGUF data offset"; return false; }
     for (auto& t : infos) {
         TensorRef r;
         r.name = t.name;
@@ -196,10 +234,18 @@ bool Mmproj::open(const std::string& path, std::string& err) {
         r.ne = t.ne;
         const size_t esz = t.type == 0 ? 4 : (t.type == 1 || t.type == 30) ? 2 : 0;
         if (esz == 0) { err = "tensor " + t.name + " has an unsupported type " + std::to_string(t.type); return false; }
-        r.bytes = (size_t) r.elems() * esz;
-        if (data0 + t.off + r.bytes > size_) { err = "tensor " + t.name + " runs past the end of the file"; return false; }
-        r.data = base + data0 + t.off;
-        tensors_[t.name] = std::move(r);
+        int64_t elements = 1;
+        for (int64_t d : r.ne) {
+            if (elements > std::numeric_limits<int64_t>::max() / d) { err = "tensor dimensions overflow"; return false; }
+            elements *= d;
+        }
+        if ((uint64_t) elements > std::numeric_limits<size_t>::max() / esz) { err = "tensor size overflow"; return false; }
+        r.bytes = (size_t) elements * esz;
+        if (t.off > size_ - data0 || r.bytes > size_ - data0 - (size_t) t.off) {
+            err = "tensor " + t.name + " runs past the end of the file"; return false;
+        }
+        r.data = base + data0 + (size_t) t.off;
+        if (!tensors_.emplace(t.name, std::move(r)).second) { err = "duplicate tensor name " + t.name; return false; }
     }
     return true;
 }
