@@ -28,6 +28,20 @@ RAM-guard fix `d148f19b`). Everything below sits on top of it as separate commit
 | `59163c8b` + `ab80ba94` | basalt #85 (mitalbert), re-implemented | `dec_gdn_rec` with two value heads per block, so it fits one wave on 84 SMs | bit-identical by construction | **opt-in**: `BASALT_FORK_GDN_REC2=1` | Fork-written CUDA, never compiled or run. Reported ~0.3–1 % |
 | `c06e5f22` | fork-written | `BASALT_FORK_DRAFT_CUM_MULT` scales the speculative draft-length threshold (1.0 = unchanged) | none (only which windows are drafted) | the variable itself | Tuning knob for A/B (try 0.8, 1.2) |
 
+## B2. Speculation tuning (fork-written, host-side policy; tests pass on the Mac)
+
+| Commit | Switch | Default | What | Expected |
+|---|---|---|---|---|
+| `d5e0c238` | `BASALT_FORK_SPLIT_COST` | on | Separate round-cost tables for MTP and lookup windows | 0–2 % on lookup-heavy text (guess) |
+| `05fcd039`, `e3474559` | `BASALT_FORK_THRESH_RAMP` | on | Draft-length threshold may rise to 1.3x base when acceptance is poor, not only fall | +1–3 % at T=1.0 (guess) |
+| `b92c4829` | `BASALT_FORK_LOOKUP_OVERRIDE` | **off** | Let a trusted lookup replace the MTP's first draft | 0–3 % (guess); `generate.cpp` edit never compiled |
+| `1626ac58` | `BASALT_FORK_MISS_THRESH` | **off** | Scale the draft threshold by the trend of CPU expert misses | 0–2 % (guess); `generate.cpp` edit never compiled |
+| `f76d8e73`, `58f4c207`, `1b86edcb` | none | n/a | `docs/coupled-draft.md`, `coupled_draft.hpp`, `coupled_draft_test.cpp`: design and host arithmetic for coupled sampled drafting. **Not wired into the engine.** | 0–8 % at T=1.0 if ever ported (guess) |
+| `2f1f7f32` | n/a | n/a | `docs/fork.md` lists these switches | |
+
+All of these only change which drafts or how many are verified; the verifier still produces every token. Window width changes, so
+a near-tie can resolve differently (the precision page already allows this).
+
 ## C. Helpers
 
 | Commit | Change |
@@ -59,6 +73,10 @@ RAM-guard fix `d148f19b`). Everything below sits on top of it as separate commit
 | `BASALT_FORK_ECOQOS` | on | `0`: leave Windows power-throttling alone |
 | `BASALT_FORK_GDN_REC2` | **off** | `1`: two-heads-per-block GDN recurrence |
 | `BASALT_FORK_DRAFT_CUM_MULT` | 1.0 | draft-length threshold multiplier, 0.25–4 |
+| `BASALT_FORK_SPLIT_COST` | on | `0`: one shared draft cost table |
+| `BASALT_FORK_THRESH_RAMP` | on | `0`: threshold only falls, as upstream |
+| `BASALT_FORK_LOOKUP_OVERRIDE` | **off** | `1`: trusted lookups may replace the MTP's first draft |
+| `BASALT_FORK_MISS_THRESH` | **off** | `1`: miss-trend scaling of the draft threshold |
 
 `CONTRIBUTING.md` upstream forbids environment-variable switches, so none of this is suitable to send upstream as is; individual
 changes (PCIe staging, pdep, answer room) can be split and offered separately.
