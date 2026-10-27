@@ -31,6 +31,7 @@ VISION_ENCODE_S = 300.0
 VISION_CACHE_BYTES = 1 << 30                    # room for about 64 images
 IMAGE_MAX_BYTES = 32 << 20                      # one image's bytes, from any source
 IMAGE_MAX_PIXELS = 64 << 20                     # matches the decoder's kMaxImagePixels
+IMAGE_MAX_SIDE = 32768                          # matches the decoder's kMaxImageSide
 
 
 @dataclass(frozen=True)
@@ -248,8 +249,9 @@ class Vision:
     @staticmethod
     def normalize(data: bytes) -> bytes:
         """Formats the decoder reads pass through; others are converted to PNG. A JPEG with an EXIF Orientation
-        other than 1 is turned upright first (needs Pillow). An image past IMAGE_MAX_PIXELS is refused before its
-        pixels are loaded; the decoder enforces the same budget for the formats it reads itself."""
+        other than 1 is turned upright first (needs Pillow). An image past IMAGE_MAX_PIXELS or IMAGE_MAX_SIDE is
+        refused before its pixels are loaded, and so is a conversion that comes out past IMAGE_MAX_BYTES; the decoder
+        enforces the same limits for the formats it reads itself."""
         jpeg = data[:3] == b"\xff\xd8\xff"
         if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
                 data[:6] in (b"GIF87a", b"GIF89a"):
@@ -266,6 +268,8 @@ class Vision:
             if width * height > IMAGE_MAX_PIXELS:
                 raise ValueError(f"the image is {width}x{height} pixels; the limit is "
                                  f"{IMAGE_MAX_PIXELS >> 20} megapixels")
+            if max(width, height) > IMAGE_MAX_SIDE:
+                raise ValueError(f"the image is {width}x{height} pixels; a side may not pass {IMAGE_MAX_SIDE}")
             im.load()
             from PIL import ImageOps
             im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied
@@ -284,6 +288,8 @@ class Vision:
             im = im.convert("RGB")
         out = io.BytesIO()
         im.save(out, format="PNG")
+        if out.tell() > IMAGE_MAX_BYTES:                 # the file the encoder is given is capped like any other
+            raise ValueError(f"the image is larger than {IMAGE_MAX_BYTES >> 20} MiB once converted to PNG")
         return out.getvalue()
 
     def encode(self, sources: list[str]) -> tuple[Path, list[int]]:
