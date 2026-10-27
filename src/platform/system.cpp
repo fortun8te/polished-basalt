@@ -56,6 +56,24 @@ bool fork_switch(const char* name) {
     return !off;
 }
 
+double fork_number(const char* name, double def, double lo, double hi) {
+    const std::string var = std::string("BASALT_FORK_") + name;
+    std::string text;
+#if defined(_WIN32)
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, var.c_str()) == 0 && value != nullptr) text = value;
+    std::free(value);
+#else
+    const char* value = std::getenv(var.c_str());
+    if (value != nullptr) text = value;
+#endif
+    if (text.empty()) return def;
+    char* end = nullptr;
+    const double x = std::strtod(text.c_str(), &end);
+    return end != text.c_str() && *end == '\0' && x >= lo && x <= hi ? x : def;
+}
+
 std::optional<std::string> capture_output(const std::vector<std::string>& argv, bool include_stderr) {
     if (argv.empty()) return std::nullopt;
     std::string cmd;

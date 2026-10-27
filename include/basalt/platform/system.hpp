@@ -27,6 +27,10 @@ std::string python_interpreter(const std::string& src_dir);
 /// set to "0". Read on each call, so a caller that asks in a hot path keeps the answer.
 bool fork_switch(const char* name);
 
+/// The number in the environment variable BASALT_FORK_<name> when it is one within [lo, hi]; `def` when the variable
+/// is unset, empty, not a number or outside the range.
+double fork_number(const char* name, double def, double lo, double hi);
+
 /// Asks that this process be the one ended first if the machine runs out of memory. No effect where the OS has no
 /// such knob.
 void prefer_oom_victim();
