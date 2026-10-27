@@ -40,6 +40,15 @@ inline constexpr int64_t kMaxImagePixels = 64ll << 20;
 /// resample would still allocate along that length.
 inline constexpr int kMaxImageSide = 32768;
 
+/// The most bytes one image file may have, as many as the server accepts for an image from any source.
+inline constexpr size_t kMaxImageBytes = 32u << 20;
+
+/// The file at `path` (UTF-8) read whole into `out` and closed again before this returns, so the caller may delete it
+/// at once.  False, with `err`, for a file that is missing, empty, unreadable or past `max_bytes`; the size is
+/// checked before any buffer is allocated.
+bool read_image_file(const std::string& path, std::vector<uint8_t>& out, std::string& err,
+                     size_t max_bytes = kMaxImageBytes);
+
 /// JPEG, PNG, BMP or GIF (first frame) from memory, three channels (alpha dropped).  False on a bad image, or on
 /// one whose header claims more than `max_pixels` or a side past `kMaxImageSide` - checked before any pixel buffer
 /// is allocated.

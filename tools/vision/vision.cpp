@@ -19,9 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <iostream>
-#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,6 +46,9 @@ bool parse_enc(const std::string& line, std::string& img, std::string& out) {
     out = rest.substr(sp + 1);
     return !img.empty() && !out.empty();
 }
+
+// The most merged tokens --max-tokens may ask for: the encoder sizes its buffers for it before READY.
+constexpr int kMaxTokensFlag = 65536;
 
 const char* const kUsage =
     "usage: basalt-vision --mmproj <mmproj.gguf> [--model <model.gguf>] [--gpu] [--threads N] [--max-tokens N] "
@@ -81,6 +82,11 @@ int main(int argc, char** argv) {
     if (mmproj.empty()) {
         std::fprintf(stderr, "%s", kUsage);
         return 2;
+    }
+    if (max_tokens > kMaxTokensFlag) {
+        std::printf("ERR --max-tokens is at most %d\n", kMaxTokensFlag);
+        std::fflush(stdout);
+        return 1;
     }
     const auto load_t0 = std::chrono::steady_clock::now();
     std::string err;
@@ -141,11 +147,11 @@ int main(int argc, char** argv) {
         std::string img_path, out_path;
         if (!parse_enc(line, img_path, out_path)) { std::printf("ERR expected: ENC <image> <output>\n"); std::fflush(stdout); continue; }
         const auto t0 = std::chrono::steady_clock::now();
-        std::ifstream f(img_path, std::ios::binary);
-        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        // The file is closed before the reply, so the caller can delete it as soon as it has one.
+        std::vector<uint8_t> bytes;
         Image img;
-        if (!f || bytes.empty() || !decode_image(bytes.data(), bytes.size(), img, err)) {
-            std::printf("ERR cannot read the image %s\n", img_path.c_str());
+        if (!read_image_file(img_path, bytes, err) || !decode_image(bytes.data(), bytes.size(), img, err)) {
+            std::printf("ERR cannot read the image %s: %s\n", img_path.c_str(), err.c_str());
             std::fflush(stdout);
             continue;
         }

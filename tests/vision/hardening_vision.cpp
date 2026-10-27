@@ -1,5 +1,5 @@
-// tests/vision/hardening_vision.cpp - a picture of any shape lands inside the token budget, and a side past the cap
-// is refused at the header.
+// tests/vision/hardening_vision.cpp - a picture of any shape lands inside the token budget, a side past the cap is
+// refused at the header, and an image file is read within its byte limit and closed.
 //
 // The pixel budget (preprocess_limit_test.cpp) bounds w * h; these cases cover what it leaves: a long thin picture,
 // whose short side the canvas rounds up to one merge unit, and a geometry with a small or odd token interval.
@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -154,6 +156,36 @@ int main() {
         CHECK(tokens(sz, defaults) >= defaults.min_tokens && tokens(sz, defaults) <= defaults.max_tokens);
         const Image canvas = to_canvas(img, sz);
         CHECK(canvas.w == sz.w && canvas.h == sz.h && canvas.rgb.size() == (size_t) sz.w * sz.h * 3);
+    }
+
+    // the byte limit is checked from the file's size, and the file is closed again when the read returns
+    {
+        const std::filesystem::path path = std::filesystem::temp_directory_path() / "basalt-vision-read-image.bin";
+        auto write = [&](size_t n) {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            const std::vector<char> data(n, 'x');
+            f.write(data.data(), (std::streamsize) n);
+        };
+        std::vector<uint8_t> bytes{1, 2, 3};
+        std::string err;
+        write(100);
+        CHECK(read_image_file(path.string(), bytes, err, 100));
+        CHECK(bytes.size() == 100 && bytes[0] == 'x' && bytes[99] == 'x');
+        std::error_code ec;
+        CHECK(std::filesystem::remove(path, ec) && !ec);        // a handle still open here would refuse this on Windows
+        write(101);
+        CHECK(!read_image_file(path.string(), bytes, err, 100));
+        CHECK(bytes.empty() && err.find("limit is 100") != std::string::npos);
+        write(0);
+        err.clear();
+        CHECK(!read_image_file(path.string(), bytes, err) && err == "empty image");
+        std::filesystem::remove(path, ec);
+        err.clear();
+        CHECK(!read_image_file(path.string(), bytes, err) && err.find("cannot open") != std::string::npos);
+        err.clear();
+        CHECK(!read_image_file(std::filesystem::temp_directory_path().string(), bytes, err));   // a directory
+        CHECK(!err.empty());
+        CHECK(kMaxImageBytes == (32u << 20));
     }
 
     if (failures != 0) return 1;
