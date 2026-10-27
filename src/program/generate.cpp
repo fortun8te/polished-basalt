@@ -35,6 +35,8 @@
 #include "basalt/core/vmm.hpp"
 #include "basalt/core/weights.hpp"
 #include "basalt/core/model_file.hpp"
+#include "basalt/core/external_ple.hpp"
+#include "basalt/platform/verified_file.hpp"
 #include "basalt/kernels/cpu/expert.hpp"
 #include "basalt/kernels/cpu/pool.hpp"
 #include "basalt/kernels/cpu/cpu_quota.hpp"
@@ -368,7 +370,7 @@ int serve_subcommand(int argc, char** argv) {
         };
         if (a == "--python") python = value();
         else if (a == "--model") { extra.insert(extra.end(), {a, absolute(value())}); have_model = true; }
-        else if (a == "--config") extra.insert(extra.end(), {a, absolute(value())});
+        else if (a == "--config" || a == "--ple-gguf") extra.insert(extra.end(), {a, absolute(value())});
         // only the first argument can be MODEL.basalt; a later bare word is the value of the option before it
         else if (i == 2 && !have_model && !a.empty() && a[0] != '-') { extra.insert(extra.end(), {"--model", absolute(a)}); have_model = true; }
         else extra.push_back(a);
@@ -410,6 +412,7 @@ void usage() {
                  "                       basalt/core/model_file.hpp; the converter stores it as the `hc8` section), exit\n"
                  "  --tokens LIST        the prompt as comma-separated token IDS (required)\n"
                  "  --tokens-file PATH   pretokenized prompt, commas or whitespace (alternative to --tokens)\n"
+                 "  --ple-gguf FILE      external original table required by a compact pack\n"
                  "  --ple-io direct|ram  n-gram table reads. direct (default): unbuffered SSD\n"
                  "                       reads, the table never enters RAM or the file cache; ram: mmap with the whole table locked in RAM at start\n"
                  "  --ple-row-cache N    bounded cache of fetched rows, 90 B each (default 1048576; 0 = off)\n"
@@ -1148,6 +1151,7 @@ int main(int argc, char** argv) {
         else if (a == "--dump-layers") o.dump_layers = next("--dump-layers");
         else if (a == "--dump-halves") o.dump_halves = next("--dump-halves");
         else if (a == "--dump-routing") o.dump_routing = next("--dump-routing");
+        else if (a == "--ple-gguf") o.ple_gguf = next("--ple-gguf");
         else if (a == "--ple-io") o.ple_io = next("--ple-io");
         else if (a == "--ple-row-cache") o.ple_row_cache = std::atoll(next("--ple-row-cache"));
         else if (a == "--ple-inflight") o.ple_inflight = std::atoi(next("--ple-inflight"));
@@ -1408,10 +1412,21 @@ int main(int argc, char** argv) {
     if (o.serve) basalt::platform::set_stdio_binary();
     basalt::core::ModelSources srcs;
     basalt::core::ModelFile model_file;
+    basalt::core::ExternalPleContract external_ple;
+    std::unique_ptr<basalt::platform::VerifiedReadFile> ple_source_lease;
+    std::string ple_path = o.ple_gguf.empty() ? o.model : o.ple_gguf;
     {
         std::string merr;
         if (!model_file.open(o.model, merr) || !model_file.load_meta(merr) || !model_file.register_gguf_view(merr)) {
             return fatal_start_error("--model: " + merr);
+        }
+        if (!basalt::core::external_ple_contract(model_file.meta(), o.ple_gguf, external_ple, merr))
+            return fatal_start_error(merr);
+        if (external_ple.active) {
+            ple_source_lease = basalt::platform::verify_file_sha256(
+                ple_path, external_ple.source_file_sha256, merr);
+            if (!ple_source_lease) return fatal_start_error(merr);
+            ple_path = ple_source_lease->path();
         }
         basalt::core::model_sources(model_file, srcs);
         if (srcs.dense.empty() || srcs.dense_index.empty() || srcs.experts.empty() || srcs.experts_layout.empty()) {
@@ -1656,14 +1671,15 @@ int main(int argc, char** argv) {
     {
         // the source tensors hold the PLE table
         try {
-            const basalt::GgufModel model(o.native_shards);
-            if (model.find("per_layer_token_embd.weight") == nullptr) {
-                basalt::log::error("basalt generate", "%s has no per_layer_token_embd.weight", o.model.c_str());
-                return 2;
-            }
+            const basalt::GgufFile table(ple_path);
+            const auto* tensor = table.find("per_layer_token_embd.weight");
+            std::string err;
+            if (external_ple.active && !basalt::core::external_ple_tensor(
+                    external_ple, tensor, table.data_start(), table.file_size(), err))
+                return fatal_start_error(err);
+            if (tensor == nullptr) return fatal_start_error(ple_path + " has no per_layer_token_embd.weight");
         } catch (const std::exception& e) {
-            basalt::log::error("basalt generate", "%s: %s", o.model.c_str(), e.what());
-            return 2;
+            return fatal_start_error(ple_path + ": " + e.what());
         }
     }
     if (o.logits_stride > 1 && (o.max_new != 1 || o.dump_logits.empty())) {
@@ -2476,18 +2492,18 @@ int main(int argc, char** argv) {
             pio.keepalive_window_s = 60.0;
             if (pio.mode != basalt::kernels::PleIo::Direct) pio.keepalive_ms = 0;
         }
-        if (!ple_table.open(o.model, err, pio)) {
+        if (!ple_table.open(ple_path, err, pio)) {
             return fatal_start_error(err);
         }
         if (pio.mode == basalt::kernels::PleIo::Direct) {
             // --ple-io direct's random reads (up to --ple-inflight at once) are for SSDs; a rotational disk can take
             // longer than the stall watchdog's limit for one prompt chunk's rows.  Recommended, not forced.
             std::string dev;
-            if (basalt::platform::disk_rotational(o.model, dev) == 1)
+            if (basalt::platform::disk_rotational(ple_path, dev) == 1)
                 basalt::log::warn("basalt generate", "the n-gram table (%s) is on a rotational disk (%s): "
                                      "--ple-io direct reads it at random and can stall a prompt for minutes. "
                                      "--ple-io ram (it then needs RAM for the table) or the model on an SSD is "
-                                     "recommended", o.model.c_str(), dev.c_str());
+                                     "recommended", ple_path.c_str(), dev.c_str());
         }
         if (pio.lock)
             basalt::log::info("basalt generate", "PLE table %s (--ple-io ram) in %.1f s",
@@ -2769,7 +2785,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         basalt::log::info("basalt generate", "PLE on, table %llu rows of %s",
-                     (unsigned long long) ple_table.rows(), o.model.c_str());
+                     (unsigned long long) ple_table.rows(), ple_path.c_str());
     }
     for (size_t i = 0; i < stages.size(); ++i) {
         GpuStage& st = *stages[i];
