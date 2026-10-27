@@ -702,7 +702,8 @@ class ParallelService(unittest.TestCase):
             try:
                 self.chat(t)
             except urllib.error.HTTPError as e:
-                errors.append(e.code)
+                with e:
+                    errors.append(e.code)
 
         threads = [threading.Thread(target=go, args=(t,)) for t in ("first question LONGREPLY", "second question")]
         for th in threads:
@@ -967,8 +968,9 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(self.get("/v1/models")["data"][0]["meta"]["n_ctx"], 1024)
         with self.assertRaises(urllib.error.HTTPError) as cm:
             self.chat("long " * 1100)
-        self.assertEqual(cm.exception.code, 400)
-        self.assertIn("(1024)", cm.exception.read().decode())
+        with cm.exception as error:
+            self.assertEqual(error.code, 400)
+            self.assertIn("(1024)", error.read().decode())
 
 
 if __name__ == "__main__":
