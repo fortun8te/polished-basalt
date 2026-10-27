@@ -142,6 +142,13 @@ int home_region_find(const std::vector<HomeRegion>& regions, uint64_t off, uint6
 /// Whether any expert's place lies in the region.
 bool home_region_used(const HomeRegion& r, const std::vector<uint64_t>& offsets);
 
+/// The slices the RAM copy is page-locked in when the driver refuses it whole: their starts in order (the first 0),
+/// then `end`, the registered range's end.  A slice ends only where a place starts on an `align` boundary, so no place
+/// (`starts`, in any order; places never overlap) runs from one slice into the next; every slice but the last is at
+/// least `min_bytes` long.  A copy without such a start is one slice.
+std::vector<uint64_t> complement_pin_slices(std::vector<uint64_t> starts, uint64_t end, uint64_t align,
+                                            uint64_t min_bytes);
+
 }  // namespace detail
 
 
@@ -431,9 +438,11 @@ public:
     /// fallback for later cache reloads. This is opt-in because the complement may still be a large allocation.
     ///
     /// The resident RAM mode (`--resident-experts`, `--resident-cpu-experts`):
-    ///   - `pin`: page-locked and mapped (`cudaHostAlloc`), so the prompt path copies it by DMA and the verify window
-    ///     may read a share of the misses over PCIe; when the driver refuses, ordinary memory locked in the working set
-    ///     instead.  `pin = false` is ordinary pageable memory.
+    ///   - `pin`: page-locked and mapped (`cudaHostRegister`), so the prompt path copies it by DMA and the verify window
+    ///     may read a share of the misses over PCIe; when the driver refuses the copy whole, it is registered in slices
+    ///     of about 1 GiB from the start, as far as the driver takes them while 1 GiB of page-locked memory is held back
+    ///     for what is allocated after the copy, and the rest is ordinary memory locked in the working set.
+    ///     `pin = false` is ordinary pageable memory.
     ///   - `lend_from_slot` >= 0: the GPU-cache slots from there to the end are the prompt path's lend region; their
     ///     experts are kept in RAM too, from the last slot down, as far as `available RAM - headroom_bytes` allows (a
     ///     lent slot's expert is streamed during the prompt and copied back after it).
@@ -598,6 +607,16 @@ private:
     bool complement_pinned_ = false;
     bool complement_partial_ = false;         ///< CS-T: only the first complement_pin_limit_ bytes are registered
     uint64_t complement_pin_limit_ = 0;
+    /// The copy's registrations, in order: each one's start and device address (one at 0 when the driver took the
+    /// whole copy).  Separate registrations need not be adjacent on the device, so an alias is its own registration's
+    /// address plus the offset into it (complement_alias).
+    std::vector<uint64_t> complement_slice_at_;
+    std::vector<const uint8_t*> complement_slice_dev_;
+    /// The device address of the copy's byte `off`, which lies in a registered slice.
+    const uint8_t* complement_alias(uint64_t off) const;
+    /// The driver would not page-lock the copy whole and took slices of it: its room for page-locked memory is short
+    /// (WDDM), so the top-up and the RAM homes are locked in the working set instead of taking what is left of it.
+    bool complement_sliced_ = false;
     uint64_t complement_lock_off_ = 0;        ///< the working-set lock covers [lock_off, lock_off + locked)
     bool complement_ready_ = false;
     uint64_t complement_locked_ = 0;          ///< bytes held in the working set (pin refused)

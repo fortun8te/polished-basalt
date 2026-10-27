@@ -272,6 +272,53 @@ void test_home_regions() {
     require(!home_region_used(regions[0], offsets) && home_region_used(regions[1], offsets), "release of the last expert");
 }
 
+void test_complement_pin_slices() {
+    using namespace basalt::core::detail;
+    // 2 layers x 6 experts of 3 and 5 bytes, the GPU holds (0,2): places 0 3 6 9 12 | 15 20 25 30 35 40, then two free
+    // places of 3 bytes at 45 and 48; the registered range ends at 56
+    std::vector<uint64_t> offsets;
+    uint64_t bytes = 0;
+    std::string error;
+    require(make_cache_complement_plan(2, 6, {3, 5}, {{0, 2}}, {}, offsets, bytes, error), error);
+    require(bytes == 45, "unexpected compact copy size");
+    std::vector<std::pair<uint64_t, uint64_t>> places;
+    for (size_t i = 0; i < offsets.size(); ++i)
+        if (offsets[i] != kNoCacheComplement) places.emplace_back(offsets[i], i < 6 ? 3 : 5);
+    places.emplace_back(45, 3);
+    places.emplace_back(48, 3);
+    auto starts_of = [&]() {
+        std::vector<uint64_t> s;
+        for (const auto& p : places) s.push_back(p.first);
+        return s;
+    };
+    auto check = [&](const std::vector<uint64_t>& cuts, uint64_t end, uint64_t align, uint64_t min_bytes) {
+        require(cuts.size() >= 2 && cuts.front() == 0 && cuts.back() == end, "the slices must cover [0, end)");
+        for (size_t j = 1; j < cuts.size(); ++j) require(cuts[j] > cuts[j - 1], "an empty or unordered slice");
+        for (size_t j = 1; j + 1 < cuts.size(); ++j) require(cuts[j] % align == 0, "a slice starts off the alignment");
+        for (size_t j = 0; j + 2 < cuts.size(); ++j) require(cuts[j + 1] - cuts[j] >= min_bytes, "a slice below the minimum");
+        for (const auto& [o, b] : places) {
+            size_t j = 0;
+            while (cuts[j + 1] <= o) ++j;
+            require(o + b <= cuts[j + 1], "a place runs from one slice into the next");
+        }
+    };
+    std::vector<uint64_t> cuts = complement_pin_slices(starts_of(), 56, 4, 8);
+    check(cuts, 56, 4, 8);
+    require(cuts == std::vector<uint64_t>{0, 12, 20, 40, 48, 56},
+            "a slice must end at the first aligned place start past its minimum");
+    std::vector<uint64_t> reversed = starts_of();
+    std::reverse(reversed.begin(), reversed.end());
+    require(complement_pin_slices(reversed, 56, 4, 8) == cuts, "the order of the places changed the slices");
+    cuts = complement_pin_slices(starts_of(), 56, 4, 30);
+    check(cuts, 56, 4, 30);
+    require(cuts == std::vector<uint64_t>{0, 40, 56}, "a 30-byte minimum");
+    // no aligned place start but the first, or a minimum above the copy: one slice
+    require(complement_pin_slices(starts_of(), 56, 64, 8) == std::vector<uint64_t>{0, 56}, "no aligned start: one slice");
+    require(complement_pin_slices(starts_of(), 56, 4, 1000) == std::vector<uint64_t>{0, 56}, "a minimum above the copy");
+    // a place starting at the end is not a cut
+    require(complement_pin_slices({0, 8, 16}, 16, 8, 8) == std::vector<uint64_t>{0, 8, 16}, "a cut at the end");
+}
+
 void test_cgroup_memory_budget() {
     using namespace basalt::core::detail;
     constexpr uint64_t GiB = 1ull << 30;
@@ -480,6 +527,7 @@ int main() {
     try {
         test_home_regions();
         test_complement_plan();
+        test_complement_pin_slices();
         test_resident_lend_region();
         test_resident_exchange();
         test_resident_room();

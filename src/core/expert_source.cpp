@@ -211,6 +211,20 @@ bool home_region_used(const HomeRegion& r, const std::vector<uint64_t>& offsets)
     return false;
 }
 
+std::vector<uint64_t> complement_pin_slices(std::vector<uint64_t> starts, uint64_t end, uint64_t align,
+                                            uint64_t min_bytes) {
+    // A cut at a place's start ends every place before it (places never overlap), and a cut on an `align` boundary is
+    // one the driver can register on both sides of.
+    std::vector<uint64_t> cuts{0};
+    if (align == 0) align = 1;
+    min_bytes = std::max<uint64_t>(min_bytes, 1);
+    std::sort(starts.begin(), starts.end());
+    for (const uint64_t s : starts)
+        if (s % align == 0 && s < end && s - cuts.back() >= min_bytes) cuts.push_back(s);
+    cuts.push_back(end);
+    return cuts;
+}
+
 }  // namespace detail
 
 namespace {
@@ -482,7 +496,8 @@ void FileExpertSource::close() {
     if (complement_arena_ != nullptr) {
         if (complement_pinned_ && !complement_partial_) (void) cudaFreeHost(complement_arena_);
         else {
-            if (complement_partial_) (void) cudaHostUnregister(complement_arena_);
+            for (const uint64_t at : complement_slice_at_)   // each registration by its own start
+                (void) cudaHostUnregister((uint8_t*) complement_arena_ + (size_t) at);
             if (complement_locked_ > 0)
                 basalt::platform::unlock_resident((uint8_t*) complement_arena_ + complement_lock_off_, complement_locked_);
             basalt::platform::free_aligned(complement_arena_);
@@ -531,6 +546,9 @@ void FileExpertSource::close() {
     complement_pinned_ = false;
     complement_partial_ = false;
     complement_pin_limit_ = 0;
+    complement_slice_at_.clear();
+    complement_slice_dev_.clear();
+    complement_sliced_ = false;
     complement_lock_off_ = 0;
     complement_ready_ = false;
     complement_locked_ = 0;
@@ -946,6 +964,9 @@ bool FileExpertSource::pin_cache_complement(
     uint64_t partial_pin = 0;   ///< a registered prefix of the arena (all of it once registered after the read)
     bool register_after = false;   ///< the arena is registered with the driver after it is filled
     uint64_t lock_off = 0;      ///< where the working-set lock starts (after the registered prefix)
+    std::vector<uint64_t> slice_at;          ///< the registrations' starts, in order (one at 0: the whole arena)
+    std::vector<const uint8_t*> slice_dev;   ///< and their device addresses
+    bool sliced = false;                     ///< slices of a copy the driver would not take whole are registered
     std::string note;
     // One alignment for both arena paths, so one call releases it whichever way it was chosen.
     constexpr size_t kArenaAlign = 2ull << 20;
@@ -953,7 +974,7 @@ bool FileExpertSource::pin_cache_complement(
         if (arena == nullptr) return;
         if (pinned_ok) (void) cudaFreeHost(arena);
         else {
-            if (partial_pin > 0) (void) cudaHostUnregister(arena);
+            for (const uint64_t at : slice_at) (void) cudaHostUnregister((uint8_t*) arena + (size_t) at);
             if (locked > 0) basalt::platform::unlock_resident((uint8_t*) arena + lock_off, locked);
             basalt::platform::free_aligned(arena);
         }
@@ -1147,14 +1168,112 @@ bool FileExpertSource::pin_cache_complement(
             device = (const uint8_t*) alias;
             partial_pin = bytes;   // released through the registered-prefix path
             lock_off = bytes;
+            slice_at.assign(1, 0);
+            slice_dev.assign(1, device);
             note = "page-locked and mapped";
         } else {
             if (reg == cudaSuccess) (void) cudaHostUnregister(arena);
             note = std::string("page-locking refused (") + cudaGetErrorString(reg) + ")";
             (void) cudaGetLastError();
-            const basalt::platform::LockResult lr = basalt::platform::lock_resident(arena, bytes);
-            locked = lr.locked_bytes;
-            note += "; " + lr.note;
+            if (reg != cudaSuccess) {
+                // Refused whole (WDDM refuses tens of GiB in one registration, and takes them in slices): register
+                // the copy slice by slice from the start instead, as the expert arena does (PinnedArena), until the
+                // driver refuses one; only the rest is locked in the working set.  A slice ends where a place starts on
+                // a 64 KiB boundary, so each expert lies inside one registration: a copy that starts in a registered
+                // range and runs past it is refused, and the GPU reads a slice through that slice's own address
+                // (separate registrations need not be adjacent on the device).
+                constexpr uint64_t kSliceBytes = 1ull << 30, kSliceAlign = 64ull << 10;
+                // WDDM charges the page-locked memory the GPU maps to one segment, and slices taken up to its ceiling
+                // leave nothing for the page-locked and device allocations made after the copy (the verify window's,
+                // the prompt path's) - with a refusal or without one, when the last slice happens to fit (Strata's
+                // pin_budget.hpp).  So this much page-locked memory is held while the slices are registered and handed
+                // back after them; what of it the driver would not give is given back from the last slices after a
+                // refusal instead.
+                constexpr uint64_t kReserve = 1ull << 30;
+                std::vector<uint64_t> starts;
+                starts.reserve(offsets.size());
+                for (const uint64_t o : offsets)
+                    if (o != kNoComplement) starts.push_back(o);
+                {
+                    uint64_t at = spare_at;
+                    for (const auto& [b, n] : spare_sizes)
+                        for (int64_t i = 0; i < n; ++i, at += b) starts.push_back(at);
+                }
+                const std::vector<uint64_t> cuts =
+                    detail::complement_pin_slices(std::move(starts), (uint64_t) padded, kSliceAlign, kSliceBytes);
+                const size_t n_slices = cuts.size() - 1;
+                // (one slice would be the very range just refused: no place starts on a boundary to cut it at)
+                void* held = nullptr;
+                uint64_t held_bytes = 0;
+                for (uint64_t r = kReserve; n_slices > 1 && r >= (64ull << 20) && held == nullptr; r /= 2) {
+                    if (cudaHostAlloc(&held, (size_t) r, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) {
+                        held_bytes = r;
+                    } else {
+                        (void) cudaGetLastError();
+                        held = nullptr;
+                    }
+                }
+                bool refused = false;
+                for (size_t k = 0; n_slices > 1 && k < n_slices; ++k) {
+                    uint8_t* at = (uint8_t*) arena + (size_t) cuts[k];
+                    void* d = nullptr;
+                    if (cudaHostRegister(at, (size_t) (cuts[k + 1] - cuts[k]),
+                                         cudaHostRegisterMapped | cudaHostRegisterPortable) != cudaSuccess) {
+                        (void) cudaGetLastError();
+                        refused = true;
+                        break;
+                    }
+                    // the staged share reads whole 128-byte lines around a blob (dm_stage_kernel), so a slice's device
+                    // address must start a line, as its host address does: one that does not is not used
+                    if (cudaHostGetDevicePointer(&d, at, 0) != cudaSuccess || d == nullptr ||
+                        ((uintptr_t) d & 127u) != 0) {
+                        (void) cudaGetLastError();
+                        (void) cudaHostUnregister(at);
+                        refused = true;
+                        break;
+                    }
+                    slice_at.push_back(cuts[k]);
+                    slice_dev.push_back((const uint8_t*) d);
+                }
+                if (held != nullptr) (void) cudaFreeHost(held);
+                const size_t took = slice_at.size();
+                const uint64_t give_back = kReserve - held_bytes;
+                uint64_t given = 0;
+                while (refused && !slice_at.empty() && given < give_back) {
+                    const size_t k = slice_at.size() - 1;
+                    (void) cudaHostUnregister((uint8_t*) arena + (size_t) cuts[k]);
+                    given += cuts[k + 1] - cuts[k];
+                    slice_at.pop_back();
+                    slice_dev.pop_back();
+                }
+                sliced = !slice_at.empty();
+                // the registered prefix: every place below it lies in a registered slice (none crosses a cut)
+                partial_pin = slice_at.empty() ? 0 : std::min<uint64_t>(cuts[slice_at.size()], bytes);
+                if (!slice_at.empty()) device = slice_dev[0];
+                char msg[160], tail[200] = "";
+                std::snprintf(msg, sizeof msg, "%zu of %zu slices page-locked and mapped instead (%.2f GiB)",
+                              slice_at.size(), n_slices, (double) partial_pin / 1073741824.0);
+                note += std::string("; ") + msg;
+                if (n_slices <= 1)
+                    std::snprintf(tail, sizeof tail, "; no place starts on a 64 KiB boundary to cut it at");
+                else if (refused)
+                    std::snprintf(tail, sizeof tail, "; the driver refused slice %zu, and %.2f GiB of slices were given "
+                                  "back", took + 1, (double) given / 1073741824.0);
+                basalt::log::info("basalt", "FileExpertSource: the driver would not page-lock the copy whole (%s); %zu of %zu "
+                                  "slices of about 1 GiB page-locked and mapped instead: %.2f of %.2f GiB, with %.2f GiB of "
+                                  "page-locked memory held back for the buffers allocated after the copy%s",
+                                  cudaGetErrorString(reg), slice_at.size(), n_slices, (double) partial_pin / 1073741824.0,
+                                  (double) bytes / 1073741824.0, (double) held_bytes / 1073741824.0, tail);
+            }
+            // only what no registration holds: a page locked by the driver and by the working set too made the next
+            // device allocation fail
+            lock_off = partial_pin;
+            if (lock_off < bytes) {
+                const basalt::platform::LockResult lr =
+                    basalt::platform::lock_resident((uint8_t*) arena + lock_off, bytes - lock_off);
+                locked = lr.locked_bytes;
+                note += "; " + lr.note;
+            }
         }
     }
     if (failed.load()) {
@@ -1180,6 +1299,9 @@ bool FileExpertSource::pin_cache_complement(
     complement_pinned_ = (pinned_ok || partial_pin > 0) && bytes > 0;
     complement_pin_limit_ = pinned_ok ? bytes : partial_pin;
     complement_partial_ = !pinned_ok && partial_pin > 0;
+    complement_slice_at_ = std::move(slice_at);
+    complement_slice_dev_ = std::move(slice_dev);
+    complement_sliced_ = sliced;
     complement_locked_ = locked;
     complement_lock_off_ = lock_off;
     complement_lent_slots_ = lend ? n_slots - keep_from : 0;
@@ -1258,7 +1380,8 @@ bool FileExpertSource::homes_take(const std::vector<std::pair<int32_t, int32_t>>
             bytes += layer_blob_bytes_[(size_t) experts[k + n++].first];
         detail::HomeRegion r;
         r.bytes = bytes;
-        if (complement_pinned_ || top_pinned_) {
+        // (a copy the driver took in slices left its page-locked room to the engine's own buffers: locked instead)
+        if ((complement_pinned_ && !complement_sliced_) || top_pinned_) {
             void* arena = nullptr;
             if (cudaHostAlloc(&arena, (size_t) bytes, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) {
                 void* alias = nullptr;
@@ -1280,7 +1403,7 @@ bool FileExpertSource::homes_take(const std::vector<std::pair<int32_t, int32_t>>
                 homes_abort();
                 return false;
             }
-            if (complement_locked_ > 0 || top_locked_ > 0)
+            if (complement_locked_ > 0 || top_locked_ > 0 || complement_sliced_)
                 r.locked = basalt::platform::lock_resident(r.arena, bytes).locked_bytes;
         }
         r.base = homes_next_;
@@ -1422,7 +1545,10 @@ uint64_t FileExpertSource::top_up(const std::vector<std::pair<int32_t, int32_t>>
     const uint8_t* device = nullptr;
     bool pinned_ok = false;
     uint64_t locked = 0;
-    if (pin && cudaHostAlloc(&arena, (size_t) total, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) {
+    // a copy the driver took in slices left its page-locked room to the engine's own buffers: the top-up is locked in
+    // the working set instead (below)
+    if (pin && !complement_sliced_ &&
+        cudaHostAlloc(&arena, (size_t) total, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) {
         void* alias = nullptr;
         if (cudaHostGetDevicePointer(&alias, arena, 0) == cudaSuccess && alias != nullptr) {
             device = (const uint8_t*) alias;
@@ -1723,7 +1849,15 @@ const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) con
         const int r = detail::home_region_find(homes_, off, layer_blob_bytes_[(size_t) layer]);
         return r >= 0 ? homes_[(size_t) r].device + (size_t) (off - homes_[(size_t) r].base) : nullptr;
     }
-    return off >= complement_bytes_ ? top_device_ + (size_t) (off - complement_bytes_) : complement_device_ + (size_t) off;
+    return off >= complement_bytes_ ? top_device_ + (size_t) (off - complement_bytes_) : complement_alias(off);
+}
+
+const uint8_t* FileExpertSource::complement_alias(uint64_t off) const {
+    if (complement_slice_at_.empty()) return complement_device_ + (size_t) off;
+    // the last registration that starts at or before `off` (the first starts at 0)
+    const size_t k = (size_t) (std::upper_bound(complement_slice_at_.begin(), complement_slice_at_.end(), off) -
+                               complement_slice_at_.begin()) - 1;
+    return complement_slice_dev_[k] + (size_t) (off - complement_slice_at_[k]);
 }
 
 bool FileExpertSource::pcie_layer(int64_t layer) const {
