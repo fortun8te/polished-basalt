@@ -28,7 +28,7 @@ from serve.api.structured import anthropic_format, check_format
 from serve.util.text import stop_strings
 
 
-BODY_MAX = 256 << 20                        # the most a JSON request body may hold (read into memory)
+BODY_MAX = 48 << 20                         # the most a JSON request body may hold (read into memory); room for one 32 MiB image as a base64 data URL
 CONTROL_BODY_MAX = 64 << 10                 # the unused body of /load and /unload
 CHUNK_MAX = 65536                           # bound chunk framing and per-chunk work
 HEADER_DEADLINE = 30.0
