@@ -1,3 +1,5 @@
+> <img src="assets/polished-basalt/polished-basalt-block.png" width="28" align="left"> **Polished Basalt** is a tuned fork of this engine for an RTX 5080 + Ryzen 9800X3D + Windows box (4 Basalt in a 2x2 → 4 Polished Basalt). See [POLISHED_BASALT.md](POLISHED_BASALT.md).
+
 <p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/basalt-lockup-dark.png"><img src="assets/basalt-lockup-light.png" alt="Basalt" width="480"></picture></p>
 
 Basalt is a local inference engine for the **Qwen3.8-Flash-Next** mixture-of-experts model.

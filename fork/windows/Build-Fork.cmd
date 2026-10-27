@@ -19,5 +19,6 @@ set "PATH=%CUDA_PATH%\bin;%PATH%"
 if errorlevel 1 exit /b %errorlevel%
 "C:\Program Files\CMake\bin\cmake.exe" --build "%FORK_BUILD%" --target basalt basalt-probe basalt-bench ^
   file_expert_source_test external_ple_test verified_file_test model_file_test mapped_file_test path_utf8_test ^
-  platform_compiler_test platform_cpu_test iq_avx2_test pool_native_test tokenizer_test --parallel 4
+  platform_compiler_test platform_cpu_test platform_system_test iq_avx2_test iq_signs_test iq_avx512_signs_test pool_native_test ^
+  tokenizer_test dec_gdn_parity --parallel 4
 exit /b %errorlevel%
