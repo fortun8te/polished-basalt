@@ -7431,12 +7431,12 @@ int main(int argc, char** argv) {
             const basalt::vision::Geometry geo;
             int max_patches = 0;
             for (size_t i = 0; i < words.size(); i += 2) {
-                std::ifstream f(words[i], std::ios::binary);
-                const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                std::vector<uint8_t> bytes;
                 basalt::vision::Image img;
                 std::string ierr;
-                if (!f || bytes.empty() || !basalt::vision::decode_image(bytes.data(), bytes.size(), img, ierr)) {
-                    reply_err("cannot read the image " + words[i]);
+                if (!basalt::vision::read_image_file(words[i], bytes, ierr) ||
+                    !basalt::vision::decode_image(bytes.data(), bytes.size(), img, ierr)) {
+                    reply_err("cannot read the image " + words[i] + ": " + ierr);
                     return;
                 }
                 Job j;
