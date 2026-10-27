@@ -19,12 +19,17 @@ constexpr double kDecay = 0.97;       // lookup counts: older windows fade
 // on the same thing); worth 4 observations, so a few real windows override it
 constexpr double kPriorQ[DraftPolicy::kBuckets] = {0.75, 0.88, 0.93, 0.96};
 constexpr double kPriorN = 4.0;
+// A lookup that disagrees with the MTP's first draft: taken only where lookups agreeing with it were accepted this
+// often, and priced by its own count, which starts at this rate (worth kPriorN observations)
+constexpr double kOverrideQ = 0.9;
+constexpr double kOverridePrior = 0.75;
 constexpr int kProbes = 3;       // a lookup window size is tried this often before its guessed cost can veto it
 
 }  // namespace
 
 DraftPolicy::DraftPolicy(int max_t, double margin)
-    : max_t_(std::clamp(max_t, 1, kMaxT)), margin_(margin), split_cost_(platform::fork_switch("SPLIT_COST")) {}
+    : max_t_(std::clamp(max_t, 1, kMaxT)), margin_(margin), split_cost_(platform::fork_switch("SPLIT_COST")),
+      override_(platform::fork_opt_in("LOOKUP_OVERRIDE")) {}
 
 int DraftPolicy::bucket(int match) {
     return match < 6 ? 0 : match < 12 ? 1 : match < 24 ? 2 : 3;
@@ -33,6 +38,11 @@ int DraftPolicy::bucket(int match) {
 double DraftPolicy::lookup_rate(int match) const {
     const int b = bucket(match);
     return (ok_[b] + kPriorN * kPriorQ[b]) / (ok_[b] + bad_[b] + kPriorN);
+}
+
+double DraftPolicy::override_rate(int match) const {
+    const int b = bucket(match);
+    return (ok_dis_[b] + kPriorN * kOverridePrior) / (ok_dis_[b] + bad_dis_[b] + kPriorN);
 }
 
 double DraftPolicy::scaled(const Cost& c, int t) {
@@ -80,12 +90,13 @@ double DraftPolicy::mtp_tokens(int t) const {
     return 1.0 + 0.7 * (t - 1);       // before any MTP window of this size: a typical acceptance
 }
 
-DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const {
+DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match, bool agrees) const {
     Pick p;
     p.t = std::clamp(t_mtp, 1, max_t_);
     if (lookup_k <= 0) return p;
+    if (!agrees && !(override_ && lookup_rate(match) >= kOverrideQ)) return p;
     const double base = mtp_tokens(p.t) / cost_ms(p.t);
-    const double q = lookup_rate(match);
+    const double q = agrees ? lookup_rate(match) : override_rate(match);
     const double ratio = split_cost_ ? lookup_ratio() : 1.0;
     double e = 1.0, qi = 1.0, best = 0.0;
     int best_t = 0;
@@ -103,14 +114,14 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
     // a guessed cost can keep the policy from ever measuring a size: the first few times a confident lookup would
     // need a size not measured yet, it is tried (verification keeps the output; only the one round's speed is at stake)
     const int t_full = std::min(lookup_k, max_t_ - 1) + 1;
-    if (t_full > p.t && mtp_cost_.n[t_full] + lookup_cost_.n[t_full] < kProbes && q >= 0.85) {
+    if (agrees && t_full > p.t && mtp_cost_.n[t_full] + lookup_cost_.n[t_full] < kProbes && q >= 0.85) {
         p.lookup = true;
         p.t = t_full;
     }
     return p;
 }
 
-void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double round_ms) {
+void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double round_ms, bool agrees) {
     t = std::clamp(t, 1, kMaxT);
     if (round_ms > 0) {
         Cost& c = lookup && split_cost_ ? lookup_cost_ : mtp_cost_;
@@ -119,8 +130,10 @@ void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double ro
     }
     if (lookup) {
         const int b = bucket(match);
-        ok_[b] = kDecay * ok_[b] + accepted;
-        bad_[b] = kDecay * bad_[b] + (accepted < t - 1 ? 1.0 : 0.0);
+        auto& ok = agrees ? ok_ : ok_dis_;
+        auto& bad = agrees ? bad_ : bad_dis_;
+        ok[b] = kDecay * ok[b] + accepted;
+        bad[b] = kDecay * bad[b] + (accepted < t - 1 ? 1.0 : 0.0);
     } else {
         const double got = accepted + 1.0;
         mtp_tok_[t] = mtp_n_[t] > 0 ? (1.0 - kTokAlpha) * mtp_tok_[t] + kTokAlpha * got : got;

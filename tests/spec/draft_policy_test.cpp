@@ -8,7 +8,10 @@
 //   5. the policy never proposes a window beyond its cap;
 //   6. with separate costs per source, a lookup round is priced by lookup rounds: cheaper rounds make a marginal
 //      lookup worth taking, dearer ones make it not (a single shared table prices both by whichever was seen last);
-//   7. with no lookup round measured yet, the separate costs choose exactly as the single table does.
+//   7. with no lookup round measured yet, the separate costs choose exactly as the single table does;
+//   8. a lookup whose first token differs from the MTP's is never taken with the override off; with it on, only
+//      where lookups of that match length have been accepted nearly always, and for as long as the disagreeing
+//      ones keep being accepted (they are counted apart from the agreeing ones).
 #include "basalt/spec/draft_policy.hpp"
 
 #include <cstdio>
@@ -104,6 +107,31 @@ int main() {
                 }
         }
         check(same, "no lookup round measured yet: separate costs choose as the single table does");
+    }
+    {
+        // a weak MTP (nothing accepted) and long matches always accepted by lookups that agreed with it
+        auto ready = [](bool on) {
+            DraftPolicy p(6);
+            p.set_override(on);
+            for (int t = 1; t <= 6; ++t)
+                for (int i = 0; i < 20; ++i) p.observe(false, t, 0, 0, cost(t));
+            for (int i = 0; i < 40; ++i) p.observe(true, 6, 5, 30, cost(6));      // agreeing long matches: all accepted
+            for (int i = 0; i < 40; ++i) p.observe(true, 6, 0, 4, cost(6));       // agreeing short matches: all rejected
+            return p;
+        };
+        DraftPolicy off = ready(false), on = ready(true);
+        check(off.choose(1, 5, 30, true).lookup, "(agreeing lookup is taken as before)");
+        check(!off.choose(1, 5, 30, false).lookup, "override off: a disagreeing lookup is not taken");
+        check(on.choose(1, 5, 30, false).lookup, "override on, bucket rate high: a disagreeing lookup is taken");
+        check(!on.choose(1, 5, 4, false).lookup, "override on, bucket rate low: it is not");
+        check(on.choose(1, 5, 30, true).lookup == off.choose(1, 5, 30, true).lookup &&
+              on.choose(1, 5, 30, true).t == off.choose(1, 5, 30, true).t, "agreeing lookups choose alike either way");
+        const double agreed = on.lookup_rate(30);
+        for (int i = 0; i < 12; ++i) on.observe(true, 6, 0, 30, cost(6), false);   // disagreeing ones keep failing
+        check(on.override_rate(30) < 0.3 && !on.choose(1, 5, 30, false).lookup,
+              "disagreeing lookups that fail stop being taken");
+        check(on.lookup_rate(30) == agreed && on.choose(1, 5, 30, true).lookup,
+              "and the agreeing rate and its lookups are untouched");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
