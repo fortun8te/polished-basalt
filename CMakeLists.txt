@@ -114,7 +114,10 @@ endfunction()
 # __AVX512VBMI__ undefined, while accepting the intrinsics of all three. The sources branch on those macros (the
 # ggml dot products pick their VNNI form by __AVX512VNNI__), so they are defined to match what the GNU flags give:
 # without it a file compiles down its no-VNNI path and runs slower than the same build on Linux. __BMI2__ is left
-# alone because -mavx2 and -mavx512* do not enable BMI2 either, so that branch is out on both platforms.
+# alone because -mavx2 and -mavx512* do not enable BMI2 either, so a branch on that macro is out on both platforms.
+# The AVX-512 i-quant rows do not branch on it: they call the BMI2 intrinsics (`pdep`, `pext`) directly, which MSVC
+# accepts with /arch:AVX512 as it is and the GNU spelling gets from -mbmi2 on that one file. cpu_avx512_ok() requires
+# BMI2, so the object only ever runs where the instructions exist.
 if(MSVC)
   set(_isa_avx512_flags "/arch:AVX512;-D__F16C__=1;-D__AVX512VNNI__=1;-D__AVX512VBMI__=1")
   set(_isa_avx2_flags "/arch:AVX2;-D__F16C__=1")
@@ -125,6 +128,11 @@ else()
   set(_isa_avx2_flags "-mavx2;-mfma;-mf16c")
   set(_isa_avxvnni_flags "-mavx2;-mfma;-mf16c;-mavxvnni")
   set(_isa_avx1_flags "-mavx")
+endif()
+if(MSVC)
+  set(_isa_avx512_bmi2_flags "${_isa_avx512_flags}")
+else()
+  set(_isa_avx512_bmi2_flags "${_isa_avx512_flags};-mbmi2")
 endif()
 
 # ---- artifact -------------------------------------------------------
@@ -1095,7 +1103,7 @@ target_sources(kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels
                                          src/kernels/cpu/kq_avx1.cpp src/kernels/cpu/ggml/ggml_cpu_dispatch.cpp
                                          $<TARGET_OBJECTS:ggml_dots_avx2> $<TARGET_OBJECTS:ggml_dots_avx512>)
 set_source_files_properties(src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS
-                            "${_isa_avx512_flags}")
+                            "${_isa_avx512_bmi2_flags}")
 set_source_files_properties(src/kernels/cpu/nvfp4_avx512.cpp PROPERTIES COMPILE_OPTIONS
                             "${_isa_avx512_flags}")
 set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "${_isa_avx2_flags}")
@@ -1298,6 +1306,18 @@ if(BUILD_TESTING)
   add_executable(iq_avx2_test tests/kernels/cpu/iq_avx2_test.cpp)
   target_link_libraries(iq_avx2_test PRIVATE kernels_cpu platform)
   basalt_cpu_test(NAME iq_avx2_test COMMAND iq_avx2_test)
+
+  # the i-quant sign bytes from a bit deposit and a parity fold against ggml's ksigns table (any host, no AVX-512)
+  add_executable(iq_signs_test tests/kernels/cpu/iq_signs_test.cpp)
+  target_include_directories(iq_signs_test PRIVATE include)
+  target_link_libraries(iq_signs_test PRIVATE Threads::Threads)
+  basalt_cpu_test(NAME iq_signs_test COMMAND iq_signs_test)
+  # the AVX-512 i-quant rows built with the deposit against the same rows built with the table, bitwise
+  add_executable(iq_avx512_signs_test tests/kernels/cpu/iq_avx512_signs_test.cpp)
+  target_link_libraries(iq_avx512_signs_test PRIVATE kernels_cpu platform)
+  basalt_cpu_test(NAME iq_avx512_signs_test COMMAND iq_avx512_signs_test)
+  set_tests_properties(iq_avx512_signs_test PROPERTIES SKIP_RETURN_CODE 77)
+  set_property(TEST iq_avx512_signs_test APPEND PROPERTY LABELS avx512)
 
   # DirectFile has a Linux backend and a Windows backend, and this test covers those two; macOS is not a platform
   # the engine builds for.

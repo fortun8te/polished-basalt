@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 #include "basalt/platform/compiler.hpp"
+#include "basalt/platform/system.hpp"
 #include <sstream>
 
 namespace basalt::kernels::cpu {
@@ -30,8 +31,15 @@ bool cpu_avx512_ok() {
         if ((xcr0 & 0xE6) != 0xE6) return false;          // the OS saves the AVX-512 state
         cpuid(7, 0);
         const unsigned ebx = r[1], ecx = r[2];
-        return ((ebx >> 16) & 1u) && ((ebx >> 30) & 1u) && ((ebx >> 31) & 1u) && ((ecx >> 11) & 1u) && ((ecx >> 1) & 1u);
+        // BMI2 (leaf 7, EBX bit 8): the AVX-512 i-quant rows are built with it and use `pdep`
+        return ((ebx >> 16) & 1u) && ((ebx >> 30) & 1u) && ((ebx >> 31) & 1u) && ((ecx >> 11) & 1u) && ((ecx >> 1) & 1u) &&
+               ((ebx >> 8) & 1u);
     }();
+    return ok;
+}
+
+bool cpu_pdep_signs_ok() {
+    static const bool ok = cpu_avx512_ok() && platform::fork_switch("PDEP_SIGNS");
     return ok;
 }
 

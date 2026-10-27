@@ -17,4 +17,12 @@ void iq512_gu_rows(int ggml_type, const uint8_t* blob, size_t gu_row, size_t up_
 void iq512_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
                 float* const* out, int r0, int r1);
 
+/// The two calls above with the way the sign masks of IQ2_XXS, IQ2_XS and IQ3_XXS are built chosen by `pdep`: from
+/// the BMI2 deposit (true) or the ksigns table (false). The results are the same bits; the first two calls take the
+/// process-wide choice (`cpu_pdep_signs_ok`).
+void iq512_gu_rows_signs(bool pdep, int ggml_type, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+                         const void* const* act, int nt, float* const* ff, int r0, int r1);
+void iq512_rows_signs(bool pdep, int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act,
+                      int nt, float* const* out, int r0, int r1);
+
 }  // namespace basalt::kernels::cpu

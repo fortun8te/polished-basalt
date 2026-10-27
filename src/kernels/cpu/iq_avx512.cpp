@@ -9,6 +9,8 @@
 // Formats: IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21), IQ2_S (22).  IQ1_M stays on ggml-cpu (no shipped
 // model has IQ1_M expert rows: the 'Coder IQ1_M' pack's gate/up are IQ2_S / IQ3_XXS / IQ3_S).
 #include "basalt/kernels/cpu/iq_avx512.hpp"
+#include "basalt/kernels/cpu/expert_layout.hpp"
+#include "basalt/kernels/cpu/iq_signs.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -28,6 +30,15 @@ inline float h2f(uint16_t h) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si1
 inline uint32_t u32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
 inline uint16_t u16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
 inline uint64_t u64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
+
+// the BMI2 parallel bit deposit and extract, called directly: not every build defines a feature macro for them. Only
+// the PD kernels reach them, and those run behind cpu_pdep_signs_ok()
+struct Pdep {
+    uint64_t operator()(uint64_t src, uint64_t mask) const { return _pdep_u64(src, mask); }
+};
+struct Pext {
+    uint64_t operator()(uint64_t src, uint64_t mask) const { return _pext_u64(src, mask); }
+};
 
 // the index of the lowest set bit of a nonzero mask: the compiler's own scan
 inline int lowest_bit(unsigned m) { return platform::ctz32(m); }
@@ -50,6 +61,7 @@ template <int TY> struct Fmt;
 template <> struct Fmt<16> {   // IQ2_XXS: d, qs[32] u16
     static constexpr int bytes = 66;
     static constexpr float K = 0.125f;
+    template <bool PD>
     static inline void decode(const uint8_t* b, int j, __m512i& g, __mmask64& m, __m512i& sc) {
         const uint8_t* q = b + 2 + 16 * j;
         const uint32_t a0 = u32(q), a1 = u32(q + 4), b0 = u32(q + 8), b1 = u32(q + 12);
@@ -57,10 +69,15 @@ template <> struct Fmt<16> {   // IQ2_XXS: d, qs[32] u16
                              (long long) iq2xxs_grid[(b0 >> 8) & 255], (long long) iq2xxs_grid[b0 & 255],
                              (long long) iq2xxs_grid[a0 >> 24], (long long) iq2xxs_grid[(a0 >> 16) & 255],
                              (long long) iq2xxs_grid[(a0 >> 8) & 255], (long long) iq2xxs_grid[a0 & 255]);
-        const uint64_t s = (uint64_t) ksigns_iq2xs[a1 & 127] | ((uint64_t) ksigns_iq2xs[(a1 >> 7) & 127] << 8) |
-                           ((uint64_t) ksigns_iq2xs[(a1 >> 14) & 127] << 16) | ((uint64_t) ksigns_iq2xs[(a1 >> 21) & 127] << 24) |
-                           ((uint64_t) ksigns_iq2xs[b1 & 127] << 32) | ((uint64_t) ksigns_iq2xs[(b1 >> 7) & 127] << 40) |
-                           ((uint64_t) ksigns_iq2xs[(b1 >> 14) & 127] << 48) | ((uint64_t) ksigns_iq2xs[(b1 >> 21) & 127] << 56);
+        uint64_t s;
+        if constexpr (PD) {
+            s = iq_sign_bytes_packed(iq_xxs_index_groups(a1, b1), Pdep{});
+        } else {
+            s = (uint64_t) ksigns_iq2xs[a1 & 127] | ((uint64_t) ksigns_iq2xs[(a1 >> 7) & 127] << 8) |
+                ((uint64_t) ksigns_iq2xs[(a1 >> 14) & 127] << 16) | ((uint64_t) ksigns_iq2xs[(a1 >> 21) & 127] << 24) |
+                ((uint64_t) ksigns_iq2xs[b1 & 127] << 32) | ((uint64_t) ksigns_iq2xs[(b1 >> 7) & 127] << 40) |
+                ((uint64_t) ksigns_iq2xs[(b1 >> 14) & 127] << 48) | ((uint64_t) ksigns_iq2xs[(b1 >> 21) & 127] << 56);
+        }
         m = _cvtu64_mask64(s);
         const int sa = 2 * (int) (a1 >> 28) + 1, sb = 2 * (int) (b1 >> 28) + 1;
         sc = scales4(sa, sa, sb, sb);
@@ -70,6 +87,7 @@ template <> struct Fmt<16> {   // IQ2_XXS: d, qs[32] u16
 template <> struct Fmt<17> {   // IQ2_XS: d, qs[32] u16 (9-bit grid index + 7-bit sign index), scales[8]
     static constexpr int bytes = 74;
     static constexpr float K = 0.125f;
+    template <bool PD>
     static inline void decode(const uint8_t* b, int j, __m512i& g, __mmask64& m, __m512i& sc) {
         const uint8_t* q = b + 2 + 16 * j;
         uint16_t v[8];
@@ -79,7 +97,11 @@ template <> struct Fmt<17> {   // IQ2_XS: d, qs[32] u16 (9-bit grid index + 7-bi
                              (long long) iq2xs_grid[v[3] & 511], (long long) iq2xs_grid[v[2] & 511],
                              (long long) iq2xs_grid[v[1] & 511], (long long) iq2xs_grid[v[0] & 511]);
         uint64_t s = 0;
-        for (int l = 0; l < 8; ++l) s |= (uint64_t) ksigns_iq2xs[v[l] >> 9] << (8 * l);
+        if constexpr (PD) {
+            s = iq_sign_bytes_packed(iq2xs_index_groups(u64(q), u64(q + 8), Pext{}), Pdep{});
+        } else {
+            for (int l = 0; l < 8; ++l) s |= (uint64_t) ksigns_iq2xs[v[l] >> 9] << (8 * l);
+        }
         m = _cvtu64_mask64(s);
         const uint8_t s0 = b[66 + 2 * j], s1 = b[66 + 2 * j + 1];
         sc = scales4(2 * (s0 & 15) + 1, 2 * (s0 >> 4) + 1, 2 * (s1 & 15) + 1, 2 * (s1 >> 4) + 1);
@@ -89,6 +111,7 @@ template <> struct Fmt<17> {   // IQ2_XS: d, qs[32] u16 (9-bit grid index + 7-bi
 template <> struct Fmt<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign bytes), qh[8], scales[8]
     static constexpr int bytes = 82;
     static constexpr float K = 0.125f;
+    template <bool>
     static inline void decode(const uint8_t* b, int j, __m512i& g, __mmask64& m, __m512i& sc) {
         const uint8_t* qs = b + 2 + 8 * j;
         const uint8_t h0 = b[66 + 2 * j], h1 = b[66 + 2 * j + 1];
@@ -105,6 +128,7 @@ template <> struct Fmt<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign bytes
 template <> struct Fmt<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 7-bit sign index + 4-bit scale)
     static constexpr int bytes = 98;
     static constexpr float K = 0.25f;
+    template <bool PD>
     static inline void decode(const uint8_t* b, int j, __m512i& g, __mmask64& m, __m512i& sc) {
         const uint8_t* q = b + 2 + 16 * j;
         g = _mm512_set_epi32((int) iq3xxs_grid[q[15]], (int) iq3xxs_grid[q[14]], (int) iq3xxs_grid[q[13]], (int) iq3xxs_grid[q[12]],
@@ -112,10 +136,15 @@ template <> struct Fmt<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 7-
                              (int) iq3xxs_grid[q[7]], (int) iq3xxs_grid[q[6]], (int) iq3xxs_grid[q[5]], (int) iq3xxs_grid[q[4]],
                              (int) iq3xxs_grid[q[3]], (int) iq3xxs_grid[q[2]], (int) iq3xxs_grid[q[1]], (int) iq3xxs_grid[q[0]]);
         const uint32_t a = u32(b + 2 + 64 + 8 * j), c = u32(b + 2 + 64 + 8 * j + 4);
-        const uint64_t s = (uint64_t) ksigns_iq2xs[a & 127] | ((uint64_t) ksigns_iq2xs[(a >> 7) & 127] << 8) |
-                           ((uint64_t) ksigns_iq2xs[(a >> 14) & 127] << 16) | ((uint64_t) ksigns_iq2xs[(a >> 21) & 127] << 24) |
-                           ((uint64_t) ksigns_iq2xs[c & 127] << 32) | ((uint64_t) ksigns_iq2xs[(c >> 7) & 127] << 40) |
-                           ((uint64_t) ksigns_iq2xs[(c >> 14) & 127] << 48) | ((uint64_t) ksigns_iq2xs[(c >> 21) & 127] << 56);
+        uint64_t s;
+        if constexpr (PD) {
+            s = iq_sign_bytes_packed(iq_xxs_index_groups(a, c), Pdep{});
+        } else {
+            s = (uint64_t) ksigns_iq2xs[a & 127] | ((uint64_t) ksigns_iq2xs[(a >> 7) & 127] << 8) |
+                ((uint64_t) ksigns_iq2xs[(a >> 14) & 127] << 16) | ((uint64_t) ksigns_iq2xs[(a >> 21) & 127] << 24) |
+                ((uint64_t) ksigns_iq2xs[c & 127] << 32) | ((uint64_t) ksigns_iq2xs[(c >> 7) & 127] << 40) |
+                ((uint64_t) ksigns_iq2xs[(c >> 14) & 127] << 48) | ((uint64_t) ksigns_iq2xs[(c >> 21) & 127] << 56);
+        }
         m = _cvtu64_mask64(s);
         const int sa = 2 * (int) (a >> 28) + 1, sb = 2 * (int) (c >> 28) + 1;
         sc = scales4(sa, sa, sb, sb);
@@ -125,6 +154,7 @@ template <> struct Fmt<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 7-
 template <> struct Fmt<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4]
     static constexpr int bytes = 110;
     static constexpr float K = 1.0f;
+    template <bool>
     static inline void decode(const uint8_t* b, int j, __m512i& g, __mmask64& m, __m512i& sc) {
         const uint8_t* q = b + 2 + 16 * j;
         const uint32_t h0 = b[66 + 2 * j], h1 = b[66 + 2 * j + 1];
@@ -141,7 +171,7 @@ template <> struct Fmt<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4]
     }
 };
 
-template <int TY, int NT>
+template <int TY, int NT, bool PD>
 inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     __m512 accf[NT];
     for (int t = 0; t < NT; ++t) accf[t] = _mm512_setzero_ps();
@@ -160,7 +190,7 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
         for (int j = 0; j < 4; ++j) {
             __m512i g, sc;
             __mmask64 m;
-            Fmt<TY>::decode(blk, j, g, m, sc);
+            Fmt<TY>::template decode<PD>(blk, j, g, m, sc);
             for (int t = 0; t < NT; ++t) {
                 const __m512i yv = _mm512_loadu_si512((const void*) (y[t][i].qs + 64 * j));
                 const __m512i ys = _mm512_mask_sub_epi8(yv, m, zero, yv);
@@ -174,7 +204,7 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
     for (int t = 0; t < NT; ++t) res[t] = _mm512_reduce_add_ps(accf[t]);
 }
 
-template <int TY, int NT>
+template <int TY, int NT, bool PD>
 void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, float* const* ff,
              int r0, int r1) {
     const block_q8_K* y[NT];
@@ -182,49 +212,49 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
     const int nb = n / QK_K;
     float g[NT], u[NT];
     for (int r = r0; r < r1; ++r) {
-        row_dot<TY, NT>(blob + (size_t) r * gu_row, nb, y, g);
-        row_dot<TY, NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
+        row_dot<TY, NT, PD>(blob + (size_t) r * gu_row, nb, y, g);
+        row_dot<TY, NT, PD>(blob + up_off + (size_t) r * gu_row, nb, y, u);
         for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
     }
 }
 
-template <int TY, int NT>
+template <int TY, int NT, bool PD>
 void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0, int r1) {
     const block_q8_K* y[NT];
     for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
     float res[NT];
     for (int r = r0; r < r1; ++r) {
-        row_dot<TY, NT>(w + (size_t) r * row_bytes, n / QK_K, y, res);
+        row_dot<TY, NT, PD>(w + (size_t) r * row_bytes, n / QK_K, y, res);
         for (int t = 0; t < NT; ++t) out[t][r] = res[t];
     }
 }
 
-template <int TY>
+template <int TY, bool PD>
 void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
                 float* const* ff, int r0, int r1) {
     switch (nt) {
-        case 1: gu_rows<TY, 1>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 2: gu_rows<TY, 2>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 3: gu_rows<TY, 3>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 4: gu_rows<TY, 4>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 5: gu_rows<TY, 5>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 6: gu_rows<TY, 6>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 7: gu_rows<TY, 7>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        default: gu_rows<TY, 8>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 1: gu_rows<TY, 1, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 2: gu_rows<TY, 2, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 3: gu_rows<TY, 3, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 4: gu_rows<TY, 4, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 5: gu_rows<TY, 5, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 6: gu_rows<TY, 6, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 7: gu_rows<TY, 7, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        default: gu_rows<TY, 8, PD>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
     }
 }
 
-template <int TY>
+template <int TY, bool PD>
 void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0,
                  int r1) {
     switch (nt) {
-        case 1: dot_rows<TY, 1>(w, row_bytes, n, act, out, r0, r1); break;
-        case 2: dot_rows<TY, 2>(w, row_bytes, n, act, out, r0, r1); break;
-        case 3: dot_rows<TY, 3>(w, row_bytes, n, act, out, r0, r1); break;
-        case 4: dot_rows<TY, 4>(w, row_bytes, n, act, out, r0, r1); break;
+        case 1: dot_rows<TY, 1, PD>(w, row_bytes, n, act, out, r0, r1); break;
+        case 2: dot_rows<TY, 2, PD>(w, row_bytes, n, act, out, r0, r1); break;
+        case 3: dot_rows<TY, 3, PD>(w, row_bytes, n, act, out, r0, r1); break;
+        case 4: dot_rows<TY, 4, PD>(w, row_bytes, n, act, out, r0, r1); break;
         default: for (int t0 = 0; t0 < nt; t0 += 4) {
             const int k = nt - t0 < 4 ? nt - t0 : 4;
-            dot_rows_nt<TY>(k, w, row_bytes, n, act + t0, out + t0, r0, r1);
+            dot_rows_nt<TY, PD>(k, w, row_bytes, n, act + t0, out + t0, r0, r1);
         }
     }
 }
@@ -271,28 +301,60 @@ bool iq512_supported(int type) noexcept {
     return type == 16 || type == 17 || type == 18 || type == 21 || type == 22;
 }
 
-void iq512_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
-                   float* const* ff, int r0, int r1) {
+// Formats whose sign masks come from stored indices (16, 17, 18) have a kernel for each way of building them; the
+// others store their sign bytes and have one.
+void iq512_gu_rows_signs(bool pdep, int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+                         const void* const* act, int nt, float* const* ff, int r0, int r1) {
     switch (type) {
-        case 16: gu_rows_nt<16>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 17: gu_rows_nt<17>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 18: gu_rows_nt<18>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 21: gu_rows_nt<21>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 22: gu_rows_nt<22>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 16:
+            if (pdep) gu_rows_nt<16, true>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
+            else gu_rows_nt<16, false>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
+            break;
+        case 17:
+            if (pdep) gu_rows_nt<17, true>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
+            else gu_rows_nt<17, false>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
+            break;
+        case 18:
+            if (pdep) gu_rows_nt<18, true>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
+            else gu_rows_nt<18, false>(nt, blob, gu_row, up_off, n, act, ff, r0, r1);
+            break;
+        case 21: gu_rows_nt<21, false>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        case 22: gu_rows_nt<22, false>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         default: break;
     }
 }
 
-void iq512_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
-                int r0, int r1) {
+void iq512_rows_signs(bool pdep, int type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
+                      float* const* out, int r0, int r1) {
     switch (type) {
-        case 16: dot_rows_nt<16>(nt, w, row_bytes, n, act, out, r0, r1); break;
-        case 17: dot_rows_nt<17>(nt, w, row_bytes, n, act, out, r0, r1); break;
-        case 18: dot_rows_nt<18>(nt, w, row_bytes, n, act, out, r0, r1); break;
-        case 21: dot_rows_nt<21>(nt, w, row_bytes, n, act, out, r0, r1); break;
-        case 22: dot_rows_nt<22>(nt, w, row_bytes, n, act, out, r0, r1); break;
+        case 16:
+            if (pdep) dot_rows_nt<16, true>(nt, w, row_bytes, n, act, out, r0, r1);
+            else dot_rows_nt<16, false>(nt, w, row_bytes, n, act, out, r0, r1);
+            break;
+        case 17:
+            if (pdep) dot_rows_nt<17, true>(nt, w, row_bytes, n, act, out, r0, r1);
+            else dot_rows_nt<17, false>(nt, w, row_bytes, n, act, out, r0, r1);
+            break;
+        case 18:
+            if (pdep) dot_rows_nt<18, true>(nt, w, row_bytes, n, act, out, r0, r1);
+            else dot_rows_nt<18, false>(nt, w, row_bytes, n, act, out, r0, r1);
+            break;
+        case 21: dot_rows_nt<21, false>(nt, w, row_bytes, n, act, out, r0, r1); break;
+        case 22: dot_rows_nt<22, false>(nt, w, row_bytes, n, act, out, r0, r1); break;
         default: break;
     }
+}
+
+void iq512_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
+                   float* const* ff, int r0, int r1) {
+    static const bool pdep = cpu_pdep_signs_ok();
+    iq512_gu_rows_signs(pdep, type, blob, gu_row, up_off, n, act, nt, ff, r0, r1);
+}
+
+void iq512_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
+                int r0, int r1) {
+    static const bool pdep = cpu_pdep_signs_ok();
+    iq512_rows_signs(pdep, type, w, row_bytes, n, act, nt, out, r0, r1);
 }
 
 }  // namespace basalt::kernels::cpu
