@@ -204,6 +204,26 @@ int fatal_start_error(const std::string& text) {
     basalt::log::error("basalt", "%s", text.c_str());
     return 1;
 }
+// A failed adaptive transfer cannot leave a published slot or a waiting graph alive.
+[[noreturn]] void adaptive_transfer_failed(const char* operation, cudaError_t error) {
+    basalt::log::error("basalt adaptive", "%s: %s", operation, cudaGetErrorString(error));
+    basalt::core::release_gpu_waits(basalt::log::stream());
+    std::fflush(basalt::log::stream());
+    std::fflush(stdout);
+    std::_Exit(1);
+}
+
+void adaptive_cuda_require(cudaError_t error, const char* operation) {
+    if (error != cudaSuccess) adaptive_transfer_failed(operation, error);
+}
+
+bool adaptive_event_ready(cudaEvent_t event, bool wait) {
+    const cudaError_t error = wait ? cudaEventSynchronize(event) : cudaEventQuery(event);
+    if (!wait && error == cudaErrorNotReady) return false;
+    adaptive_cuda_require(error, "waiting for adaptive copies");
+    return true;
+}
+
 // " (N MiB of M MiB VRAM free on this GPU)" for an allocation's failure message (clears the error first)
 std::string vram_free_note() {
     (void) cudaGetLastError();
@@ -6017,14 +6037,14 @@ int main(int argc, char** argv) {
         std::vector<std::pair<int32_t, int32_t>> pending;
         std::vector<std::array<int32_t, 3>> promoted;   // (layer, in, out) of swaps from the peer
         cudaEvent_t adapt_ev = nullptr;
-        cudaEventCreateWithFlags(&adapt_ev, cudaEventDisableTiming);
+        adaptive_cuda_require(cudaEventCreateWithFlags(&adapt_ev, cudaEventDisableTiming), "creating adaptive event");
         // a layer split's later stages keep a copy of the residency table on their devices, and swap on their own
         auto res_upload = [&]() {
             if (d_res != nullptr)
-                res_put(d_res);
+                adaptive_cuda_require(res_put(d_res), "uploading adaptive residency");
             for (auto& st : stages) {
                 const basalt::core::OnDevice on(st->dev);
-                res_put(st->d_res);
+                adaptive_cuda_require(res_put(st->d_res), "uploading adaptive stage residency");
             }
         };
         // the peer's swaps land a window after their copies are queued, so no window waits for a copy
@@ -6067,12 +6087,11 @@ int main(int argc, char** argv) {
                 else if (x.has_pending()) { x.issue_pending(true); xlanding[q] = 1; }
             }
             if (pending.empty()) return;
-            if (wait) cudaEventSynchronize(adapt_ev);
-            else if (cudaEventQuery(adapt_ev) != cudaSuccess) return;
+            if (!adaptive_event_ready(adapt_ev, wait)) return;
             for (auto& st : stages)
                 if (st->adapt_live) {
-                    if (wait) cudaEventSynchronize(st->adapt_ev);
-                    else if (cudaEventQuery(st->adapt_ev) != cudaSuccess) return;
+                    const basalt::core::OnDevice on(st->dev);
+                    if (!adaptive_event_ready(st->adapt_ev, wait)) return;
                 }
             for (auto& st : stages) st->adapt_live = false;
             if (exchanges) src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
@@ -6236,12 +6255,12 @@ int main(int argc, char** argv) {
                 pending.emplace_back((int32_t) in, slot);      // resident once the copy has landed
                 if (peer.valid() && peer.has(s.layer, s.in)) promoted.push_back({s.layer, s.in, s.out});
             }
-            if (!swaps.empty()) cudaEventRecord(adapt_ev, adapt_stream);
+            if (!swaps.empty()) adaptive_cuda_require(cudaEventRecord(adapt_ev, adapt_stream), "recording adaptive copies");
             (void) main_live;
             for (auto& st : stages)
                 if (st->adapt_live) {
                     const basalt::core::OnDevice on(st->dev);
-                    cudaEventRecord(st->adapt_ev, st->adapt_stream);
+                    adaptive_cuda_require(cudaEventRecord(st->adapt_ev, st->adapt_stream), "recording adaptive stage copies");
                 }
             // the routing counted since the start (each count adds up to 1 / (1 - --adapt-decay) over its decays: the
             // sum is proportional to the routing itself) - only with --expert-profile-save, else `heat` is empty
@@ -6295,14 +6314,14 @@ int main(int argc, char** argv) {
             xq_pin = nullptr;
         }
         cudaEvent_t p2p_ev = nullptr;   // the copies out of the peer's slots, which a promotion's reassign refills
-        cudaEventCreateWithFlags(&p2p_ev, cudaEventDisableTiming);
+        adaptive_cuda_require(cudaEventCreateWithFlags(&p2p_ev, cudaEventDisableTiming), "creating adaptive peer event");
         // a round made resident before its copies were done: the bookkeeping that waits for them (the next round or
         // a drain), and the RAM pages of its experts
         bool xq_unsettled = false;
         std::vector<std::pair<int32_t, int32_t>> xq_released;
         auto xq_settle = [&]() {
             if (!xq_unsettled) return;
-            cudaEventSynchronize(adapt_ev);
+            (void) adaptive_event_ready(adapt_ev, true);
             for (const auto& [l, e] : xq_released) srcp->release(l, e);
             xq_released.clear();
             res_upload();
@@ -6390,7 +6409,7 @@ int main(int argc, char** argv) {
                 if (!plan(swaps[i])) return false;
             }
             if (!xq.empty()) {
-                cudaEventRecord(adapt_ev, adapt_stream);
+                adaptive_cuda_require(cudaEventRecord(adapt_ev, adapt_stream), "recording adaptive copies");
                 xq_stage = 1;
             }
             for (float& v : drive.d.usage) v *= fast_decay;
@@ -6402,7 +6421,7 @@ int main(int argc, char** argv) {
             const auto& lay = basalt::kernels::cpu::expert_layout();
             if (xq_stage == 2) ver.flush_post_launch();
             const bool nowait = xq_stage == 2 && xq_words && !wait;
-            if (!nowait) cudaEventSynchronize(adapt_ev);
+            if (!nowait) (void) adaptive_event_ready(adapt_ev, true);
             if (xq_stage == 1) {
                 for (const XSwap& x : xq) {
                     if (x.xchg && !src.spare_land(x.lout, x.out, x.off)) {
@@ -6414,9 +6433,9 @@ int main(int argc, char** argv) {
                 }
                 {   // the residency uploads go ahead of the incoming copies in the copy queue
                     std::string perr;
-                    if (!ver.dm_presync(perr)) basalt::log::warn("basalt serve", "%s", perr.c_str());
+                    if (!ver.dm_presync(perr)) adaptive_transfer_failed(perr.c_str(), cudaErrorUnknown);
                     res_upload();
-                    ver.dm_fence(adapt_stream);
+                    if (!ver.dm_fence(adapt_stream)) adaptive_transfer_failed("ordering adaptive copies", cudaErrorUnknown);
                 }
                 bool deferred = false, p2p = false;
                 for (const XSwap& x : xq) {   // stream order keeps each behind its slot's eviction copy
@@ -6431,7 +6450,7 @@ int main(int argc, char** argv) {
                     }
                     deferred = true;
                 }
-                if (p2p) cudaEventRecord(p2p_ev, adapt_stream);
+                if (p2p) adaptive_cuda_require(cudaEventRecord(p2p_ev, adapt_stream), "recording adaptive peer copies");
                 const uint32_t* pw = nullptr;   // this round's landed words and number
                 xq_words = xq_pin != nullptr && ver.landed_ok();
                 if (xq_words) {
@@ -6460,20 +6479,20 @@ int main(int argc, char** argv) {
                         for (size_t k = 0; k < ord.size(); ++k) {
                             const XSwap& x = xq[ord[k]];
                             const uint8_t* b = srcp->blob(x.layer, x.in);
-                            if (b == nullptr || cudaMemcpyAsync(xcache.device_slot(x.slot), b, (size_t) lay2.blob_bytes(x.layer),
-                                                                cudaMemcpyHostToDevice, adapt_stream) != cudaSuccess)
-                                basalt::log::warn("basalt serve", "adaptive swap copy failed (layer %d, slot %d): %s",
-                                             (int) x.layer, (int) x.slot, cudaGetErrorString(cudaGetLastError()));
-                            if (pw != nullptr && (k + 1 == ord.size() || xq[ord[k + 1]].layer != x.layer) &&
-                                cudaMemcpyAsync(ver.landed_words() + x.layer, pw + g.n_layers, 4, cudaMemcpyHostToDevice,
-                                                adapt_stream) != cudaSuccess)
-                                basalt::log::warn("basalt serve", "the landed word's copy failed (layer %d): %s", (int) x.layer,
-                                             cudaGetErrorString(cudaGetLastError()));
+                            if (b == nullptr)
+                                adaptive_transfer_failed("missing adaptive expert source", cudaErrorInvalidValue);
+                            adaptive_cuda_require(cudaMemcpyAsync(xcache.device_slot(x.slot), b, (size_t) lay2.blob_bytes(x.layer),
+                                                                  cudaMemcpyHostToDevice, adapt_stream),
+                                                  "copying adaptive expert");
+                            if (pw != nullptr && (k + 1 == ord.size() || xq[ord[k + 1]].layer != x.layer))
+                                adaptive_cuda_require(cudaMemcpyAsync(ver.landed_words() + x.layer, pw + g.n_layers, 4,
+                                                                      cudaMemcpyHostToDevice, adapt_stream),
+                                                      "publishing adaptive landed word");
                         }
-                        cudaEventRecord(adapt_ev, adapt_stream);
+                        adaptive_cuda_require(cudaEventRecord(adapt_ev, adapt_stream), "recording adaptive copies");
                     });
                 } else {
-                    cudaEventRecord(adapt_ev, adapt_stream);
+                    adaptive_cuda_require(cudaEventRecord(adapt_ev, adapt_stream), "recording adaptive copies");
                 }
                 xq_stage = 2;
                 return true;
@@ -6481,7 +6500,7 @@ int main(int argc, char** argv) {
             // with the landed words the incoming experts are resident from the next window on while their copies land:
             // its gate/up launches wait for them, and what needs them done waits in xq_settle
             if (nowait && std::any_of(xq.begin(), xq.end(), [](const XSwap& x) { return x.p2p; }))
-                cudaEventSynchronize(p2p_ev);   // a promotion's peer slot is refilled below
+                (void) adaptive_event_ready(p2p_ev, true);   // a promotion's peer slot is refilled below
             for (const XSwap& x : xq) {
                 host_res[(size_t) x.layer * g.n_expert + x.in] = x.slot;
                 if (x.xchg && !x.p2p) src.spare_release(x.layer, x.in);
@@ -11099,14 +11118,11 @@ int main(int argc, char** argv) {
         // swaps in flight - (residency index, slot) admitted when adapt_ev has completed
         std::vector<std::pair<int32_t, int32_t>> pending;
         cudaEvent_t adapt_ev = nullptr;
-        cudaEventCreateWithFlags(&adapt_ev, cudaEventDisableTiming);
+        adaptive_cuda_require(cudaEventCreateWithFlags(&adapt_ev, cudaEventDisableTiming), "creating adaptive event");
         int64_t adapt_rounds = 0;   // counted here: `rounds` is declared below the adapt lambda
         auto apply_pending = [&](bool wait) {
             if (pending.empty()) return;
-            if (wait) cudaEventSynchronize(adapt_ev);
-            else if (cudaEventQuery(adapt_ev) != cudaSuccess) {
-                return;
-            }
+            if (!adaptive_event_ready(adapt_ev, wait)) return;
             src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
             for (const auto& [i, slot] : pending) {
                 host_res[(size_t) i] = slot;
@@ -11114,7 +11130,7 @@ int main(int argc, char** argv) {
             }
             pending.clear();
             if (d_res != nullptr)
-                res_put(d_res);
+                adaptive_cuda_require(res_put(d_res), "uploading adaptive residency");
         };
         // The VRAM tier follows the conversation.  Candidates are missing experts routed at least twice (decayed); each
         // is paired with its layer's least-routed resident expert and swapped when it was routed clearly more often.
@@ -11174,7 +11190,7 @@ int main(int argc, char** argv) {
                 srcp->prefetch(s.layer, s.out);   // a file-backed arena released its pages: read them back ahead
                 pending.emplace_back((int32_t) in, slot);      // resident once the copy has landed
             }
-            if (!swaps.empty()) cudaEventRecord(adapt_ev, adapt_stream);
+            if (!swaps.empty()) adaptive_cuda_require(cudaEventRecord(adapt_ev, adapt_stream), "recording adaptive copies");
             for (float& v : drive.d.usage) v *= o.adapt_decay;
             swaps_total += (int64_t) swaps.size();
             ms_adapt += std::chrono::duration<double, std::milli>(Clock::now() - ta).count();
