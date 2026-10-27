@@ -20,7 +20,7 @@ import json
 import time
 import uuid
 
-from serve.frontend import Event, _late_system_to_user, _parts_of, effort_kwargs, stable_tool_order
+from serve.frontend import Event, _late_system_to_user, _parts_of, effort_kwargs, order_tool_results, stable_tool_order
 
 ENCRYPTED_PREFIX = "basalt.r1:"                   # our own reasoning replay strings; others' are ignored
 HOSTED_TOOLS = ("web_search", "web_search_preview", "file_search", "computer_use_preview", "computer_use",
@@ -188,7 +188,10 @@ def input_messages(req: dict) -> list[dict]:
         else:
             raise ResponsesError(f"input items of type {kind!r} are not supported", param + ".type",
                                  "unsupported_parameter")
-    _order_tool_results(messages)
+    try:
+        order_tool_results(messages)
+    except ValueError as exc:
+        raise ResponsesError(str(exc), "input") from None
     # leading system/developer messages merge into one system message; later ones become user messages
     lead = 0
     while lead < len(messages) and messages[lead]["role"] == "system" and isinstance(messages[lead]["content"], str):
@@ -196,27 +199,6 @@ def input_messages(req: dict) -> list[dict]:
     if lead > 1:
         messages[:lead] = [{"role": "system", "content": "\n\n".join(m["content"] for m in messages[:lead])}]
     return _late_system_to_user(messages)
-
-
-def _order_tool_results(messages):
-    """Reorder each run of tool messages to match the preceding assistant turn's calls, then drop the private ids."""
-    i = 0
-    while i < len(messages):
-        if messages[i]["role"] != "tool":
-            i += 1
-            continue
-        j = i
-        while j < len(messages) and messages[j]["role"] == "tool":
-            j += 1
-        prev = messages[i - 1] if i else {}
-        order = [c.get("_call_id") for c in prev.get("tool_calls") or []]
-        rank = {cid: k for k, cid in enumerate(order) if cid}
-        messages[i:j] = sorted(messages[i:j], key=lambda m: rank.get(m.get("_call_id"), len(order)))
-        i = j
-    for m in messages:
-        m.pop("_call_id", None)
-        for c in m.get("tool_calls") or []:
-            c.pop("_call_id", None)
 
 
 def request_tools(req: dict):
@@ -232,6 +214,8 @@ def request_tools(req: dict):
         if not isinstance(name, str) or not name:
             raise ResponsesError("a tool needs a name", param + ".name")
         flat = f"{namespace}.{name}" if namespace else name
+        if flat in names:
+            raise ResponsesError(f"duplicate tool name {flat!r}", param + ".name")
         description = tool.get("description") or ""
         if ns_description:
             description = ns_description + ("\n\n" + description if description else "")
@@ -335,6 +319,7 @@ class Assembler:
         self.prompt_tokens = prompt_tokens
         self.seq = 0
         self.item = None                             # the open output item
+        self.unfinished_call = False
         reasoning = req.get("reasoning") if isinstance(req.get("reasoning"), dict) else {}
         self.response = {
             "id": new_id("resp"), "object": "response", "created_at": int(time.time()), "status": "in_progress",
@@ -381,10 +366,14 @@ class Assembler:
     def index(self) -> int:
         return len(self.response["output"]) - 1
 
-    def close(self, status="completed") -> list[dict]:
+    def close(self, status=None) -> list[dict]:
         item, self.item = self.item, None
         if item is None:
             return []
+        if status is None:
+            status = "incomplete" if item["type"] in ("function_call", "custom_tool_call") else "completed"
+        if status == "incomplete" and item["type"] in ("function_call", "custom_tool_call"):
+            self.unfinished_call = True
         at, out = self.response["output"].index(item), []
         item["status"] = status
         if item["type"] == "message":
@@ -400,10 +389,10 @@ class Assembler:
             if self.encrypted:
                 item["encrypted_content"] = ENCRYPTED_PREFIX + base64.b64encode(
                     json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")).decode("ascii")
-        elif item["type"] == "function_call":
+        elif item["type"] == "function_call" and status == "completed":
             out.append(self.event("response.function_call_arguments.done", item_id=item["id"], output_index=at,
                                   name=item["name"], arguments=item["arguments"]))
-        elif item["type"] == "custom_tool_call":
+        elif item["type"] == "custom_tool_call" and status == "completed":
             out.append(self.event("response.custom_tool_call_input.done", item_id=item["id"], output_index=at,
                                   input=item["input"]))
         out.append(self.event("response.output_item.done", output_index=at, item=copy.deepcopy(item)))
@@ -458,7 +447,7 @@ class Assembler:
                 item["input"] = value if isinstance(value, str) else json.dumps(ev.call.arguments, ensure_ascii=False)
                 out.append(self.event("response.custom_tool_call_input.delta", item_id=item["id"],
                                       output_index=self.index, delta=item["input"]))
-            out += self.close()
+            out += self.close("completed")
         return out
 
     def _call_item(self, ev: Event) -> dict:
@@ -485,9 +474,10 @@ class Assembler:
             "input_tokens": prompt, "input_tokens_details": {"cached_tokens": min(done.get("reused") or 0, prompt)},
             "output_tokens": n, "output_tokens_details": {"reasoning_tokens": done.get("reasoning_tokens", 0)},
             "total_tokens": prompt + n}
-        if length:
+        if length or unfinished or self.unfinished_call:
             self.response["status"] = "incomplete"
-            self.response["incomplete_details"] = {"reason": "max_output_tokens"}
+            if length:
+                self.response["incomplete_details"] = {"reason": "max_output_tokens"}
             return out + [self.event("response.incomplete", response=self.snapshot())]
         self.response["status"] = "completed"
         self.response["completed_at"] = int(time.time())
