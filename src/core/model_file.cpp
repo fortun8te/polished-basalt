@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace basalt::core {
@@ -36,6 +37,8 @@ namespace {
 // False when the file system, the platform or the allocation refuses, and the caller takes the ordinary read.
 bool pread_direct(const std::string& path, void* dst, uint64_t n, uint64_t off) {
     constexpr uint64_t kAlign = 4096, kChunk = 16ull << 20;
+    if (n > (std::numeric_limits<uint64_t>::max)() - off ||
+        off + n > (std::numeric_limits<uint64_t>::max)() - (kAlign - 1)) return false;
     const int fd = platform::open_unbuffered(path);
     if (fd < 0) return false;
     void* bounce = basalt::platform::alloc_aligned((size_t) (std::min<uint64_t>(n, kChunk) + 2 * kAlign), kAlign);
@@ -64,6 +67,10 @@ bool pread_direct(const std::string& path, void* dst, uint64_t n, uint64_t off) 
 
 bool read_range_at(const FileRange& r, uint64_t off, void* dst, uint64_t n, std::string& err) {
     if (r.bytes != 0 && (off > r.bytes || n > r.bytes - off)) { err = "read past the end of a section of " + r.path; return false; }
+    if (off > (std::numeric_limits<uint64_t>::max)() - r.offset ||
+        n > (std::numeric_limits<uint64_t>::max)() - (r.offset + off)) {
+        err = "invalid read offset in " + r.path; return false;
+    }
     constexpr uint64_t kDirectMin = 256ull << 10;
     if (n >= kDirectMin && pread_direct(r.path, dst, n, r.offset + off)) return true;
     const int fd = platform::open_fd_utf8(r.path);
@@ -357,7 +364,7 @@ MetaValue meta_value(const Json& j) {
         case Json::Type::Bool: v.type = MetaType::BOOL; v.u = j.b ? 1 : 0; break;
         case Json::Type::Int:
             v.type = j.neg ? MetaType::I64 : MetaType::U64;
-            v.u = j.neg ? (uint64_t) (-(int64_t) j.u) : j.u;
+            v.u = j.neg ? uint64_t{0} - j.u : j.u;
             if (j.neg) v.f = -(double) j.u;
             break;
         case Json::Type::Float: v.type = MetaType::F64; v.f = j.f; break;
@@ -389,21 +396,29 @@ bool ModelFile::register_gguf_view(std::string& err) const {
         const Json* type_id = t.get("type_id");
         const Json* shape = t.get("shape");
         const Json* off = t.get("offset");
+        const auto nonnegative = [](const Json* j) { return j && j->type == Json::Type::Int && !j->neg; };
         if (gg == nullptr || type_id == nullptr || shape == nullptr || !shape->is_array() || off == nullptr ||
+            !nonnegative(type_id) || type_id->u > (std::numeric_limits<uint32_t>::max)() || !nonnegative(off) ||
             shape->items.empty() || shape->items.size() > 4 || shape->count != shape->items.size()) {
             err = path_ + ": meta.tensors['" + name + "'] is malformed (or there is no gguf section)";
             return false;
         }
         TensorInfo ti;
         ti.name = name;
-        for (const Json& d : shape->items) ti.shape.push_back(d.u64());
+        for (const Json& d : shape->items) {
+            if (!nonnegative(&d) || d.u == 0) { err = path_ + ": tensor " + name + " has a bad shape"; return false; }
+            ti.shape.push_back(d.u64());
+        }
         ti.type = (uint32_t) type_id->u64();
-        ti.offset = gg->offset + off->u64();
-        if (const Json* nb = t.get("bytes"))
-            if (off->u64() > gg->bytes || nb->u64() > gg->bytes - off->u64()) {
+        const Json* nb = t.get("bytes");
+        const uint64_t payload = tensor_payload_bytes(ti);
+        if (!ti.elements() || off->u64() > gg->bytes ||
+            (payload && payload > gg->bytes - off->u64()) ||
+            (nb && (!nonnegative(nb) || nb->u64() > gg->bytes - off->u64()))) {
                 err = path_ + ": tensor " + name + " runs past the end of the gguf section";
                 return false;
-            }
+        }
+        ti.offset = gg->offset + off->u64();
         view->tensors.push_back(std::move(ti));
     }
     gguf_register_virtual(path_, std::move(view));
@@ -443,14 +458,25 @@ const Hc8Copy* hc8_find(const std::string& name, int rows, int cols) {
     return &it->second;
 }
 
+static bool hc8_bytes(uint32_t rows, uint32_t cols, uint32_t srow, uint64_t& out) {
+    const uint64_t row = (uint64_t) cols + (uint64_t) srow * 2;
+    if (rows && row > (std::numeric_limits<uint64_t>::max)() / rows) return false;
+    out = row * rows;
+    return true;
+}
+
 bool hc8_write(const std::string& path, const std::vector<Hc8Copy>& copies, std::string& err) {
+    if (copies.size() > 4096) { err = "hc8: implausible entry count"; return false; }
     std::vector<Hc8Entry> entries(copies.size());
     uint64_t at = (sizeof(Hc8Header) + copies.size() * sizeof(Hc8Entry) + 255) & ~255ull;
     for (size_t i = 0; i < copies.size(); ++i) {
         const Hc8Copy& c = copies[i];
         if (c.name.size() >= sizeof entries[i].name) { err = "hc8: name too long: " + c.name; return false; }
-        const uint64_t want = (uint64_t) c.rows * c.cols + (uint64_t) c.rows * c.srow * 2;
-        if (c.data.size() != want) { err = "hc8: wrong size for " + c.name; return false; }
+        uint64_t want = 0;
+        if (!hc8_bytes(c.rows, c.cols, c.srow, want) || c.data.size() != want ||
+            want > (std::numeric_limits<uint64_t>::max)() - at - 255) {
+            err = "hc8: wrong size for " + c.name; return false;
+        }
         std::memset(&entries[i], 0, sizeof entries[i]);
         std::memcpy(entries[i].name, c.name.data(), c.name.size());
         entries[i].rows = c.rows;
@@ -507,8 +533,8 @@ bool hc8_read(const FileRange& r, std::map<std::string, Hc8Copy>& out, std::stri
         c.rows = e.rows;
         c.cols = e.cols;
         c.srow = e.srow;
-        const uint64_t want = (uint64_t) e.rows * e.cols + (uint64_t) e.rows * e.srow * 2;
-        if (e.bytes != want || e.offset > total || want > total - e.offset || e.cols % 32 != 0 ||
+        uint64_t want = 0;
+        if (!hc8_bytes(e.rows, e.cols, e.srow, want) || e.bytes != want || e.offset > total || want > total - e.offset || e.cols % 32 != 0 ||
             e.srow < e.cols / 32) {
             err = "hc8: entry " + c.name + " is malformed";
             return false;

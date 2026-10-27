@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 
 #include "basalt/program/json_scan.hpp"
@@ -71,6 +72,7 @@ inline size_t pair_slot(uint64_t key, uint64_t mask) { return (size_t) (((key * 
 bool Tokenizer::load(std::string_view vocab_json, std::string_view merges_txt, std::string_view types_json,
                      std::string& err) {
     raw_.clear();
+    struct LoadGuard { std::vector<std::string>& raw; bool success = false; ~LoadGuard() { if (!success) raw.clear(); } } guard{raw_};
     merges_.clear();
     memo_.clear();
     memo_used_ = 0;
@@ -86,10 +88,13 @@ bool Tokenizer::load(std::string_view vocab_json, std::string_view merges_txt, s
         if (!sc.eat(']')) {
             do {
                 int64_t t = 0;
-                if (!sc.integer(t)) { err = "token_type.json: bad entry"; return false; }
+                if (!sc.integer(t) || t > (std::numeric_limits<int8_t>::max)()) { err = "token_type.json: bad entry"; return false; }
                 types.push_back((int8_t) t);
             } while (sc.eat(','));
+            if (!sc.eat(']')) { err = "token_type.json: unterminated"; return false; }
         }
+        sc.ws();
+        if (sc.i != sc.s.size()) { err = "token_type.json: trailing data"; return false; }
     }
 
     // vocab.json: key text -> id; the raw bytes go to raw_[id]
@@ -102,12 +107,17 @@ bool Tokenizer::load(std::string_view vocab_json, std::string_view merges_txt, s
         if (!sc.eat('}')) {
             do {
                 int64_t id = 0;
-                if (!sc.str(key) || !sc.eat(':') || !sc.integer(id)) { err = "vocab.json: bad entry"; return false; }
+                if (!sc.str(key) || !sc.eat(':') || !sc.integer(id) ||
+                    id > (std::numeric_limits<int32_t>::max)() || (uint64_t) id >= vocab_json.size()) {
+                    err = "vocab.json: bad entry"; return false;
+                }
                 entries.emplace_back(key, id);
                 max_id = std::max(max_id, id);
             } while (sc.eat(','));
             if (!sc.eat('}')) { err = "vocab.json: unterminated"; return false; }
         }
+        sc.ws();
+        if (sc.i != sc.s.size()) { err = "vocab.json: trailing data"; return false; }
     }
     if (max_id < 0) { err = "vocab.json: empty"; return false; }
     raw_.assign((size_t) max_id + 1, std::string());
@@ -117,6 +127,7 @@ bool Tokenizer::load(std::string_view vocab_json, std::string_view merges_txt, s
     std::vector<Literal> literals_all;
     std::string bytes;
     for (auto& [key, id] : entries) {
+        if (have[(size_t) id]) { err = "vocab.json: duplicate id"; return false; }
         const bool pure = unspell(key, bytes);
         const int ty = (size_t) id < types.size() ? types[(size_t) id] : -1;
         if (ty == 3 || ty == 4) {
@@ -142,6 +153,8 @@ bool Tokenizer::load(std::string_view vocab_json, std::string_view merges_txt, s
     size_t n_merges = 0;
     for (char c : merges_txt) n_merges += c == '\n';
     n_merges += merges_txt.empty() ? 0 : 1;
+    if (n_merges >= (std::numeric_limits<uint32_t>::max)() ||
+        n_merges > (std::numeric_limits<size_t>::max)() / 4) { err = "merges.txt: too many entries"; return false; }
     size_t cap = 1024;
     while (cap < n_merges * 2) cap <<= 1;
     merges_.assign(cap, Merge());
@@ -185,6 +198,7 @@ bool Tokenizer::load(std::string_view vocab_json, std::string_view merges_txt, s
     }
     build_literals(always_, four);
     build_literals(all_, three_four);
+    guard.success = true;
     return true;
 }
 
