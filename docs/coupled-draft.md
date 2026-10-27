@@ -62,9 +62,9 @@ together (they must stay the same products in the same order).
   the split part and `sampler_split_merge_kernel` (587-690), `apply_penalties` / `history_count` (70-76).
 - `include/basalt/kernels/sampler.hpp:15` `SamplerParams`; `include/basalt/core/verify.hpp:160` `set_sampling` (its
   comment says the drafter never sees the request's sampling: that changes).
-- `src/program/generate.cpp`: next to `ver.set_sampling(req_sp)` (9519, 9539) and the CLI's (10664); the batch path
-  (`draft_seq`, 7743) and the pipelined `draft_from` (10129) stay on argmax in a first version.
-- Unchanged on purpose: `verify.cpp:4091-4107` (the exact-match rule), which is what keeps the text.
+- `src/program/generate.cpp`: next to `ver.set_sampling(req_sp)` (9918, 9938) and the CLI's (11081); the batch path
+  (`draft_seq`, 8020) and the pipelined `draft_from` (10534) stay on argmax in a first version.
+- Unchanged on purpose: `verify.cpp:4094-4110` (the exact-match rule), which is what keeps the text.
 
 ## Port map (Strata, MIT, same lineage; read only)
 `src/kernels/cuda/sampler.cu` 798-935 (`coupled_stage_kernel`: request params and penalty-ring base from mapped host
