@@ -31,6 +31,22 @@ bool fork_switch(const char* name);
 /// such knob.
 void prefer_oom_victim();
 
+/// What `keep_full_speed` found.
+enum class FullSpeed {
+    NotNeeded,   ///< the OS does not slow a process for the state of its window
+    Set,         ///< the OS accepted the request
+    Refused,     ///< the OS refused it
+    Disabled,    ///< BASALT_FORK_ECOQOS=0 turned it off
+};
+
+/// Asks the OS not to lower the execution speed of this process, and of the calling thread, while its window is in
+/// the background. Where it does, the lowering keeps a process on the efficiency cores of a hybrid CPU and shares
+/// the pool's workers over fewer cores. Call it once, early. `os_error` receives the OS error code for `Refused`.
+FullSpeed keep_full_speed(unsigned* os_error);
+
+/// The same request for the calling thread alone, for threads started later. Best effort, nothing to report.
+void keep_thread_full_speed();
+
 /// Whether a process is given direct GPU-to-GPU access between its devices, which a second GPU holding an expert tier
 /// needs. False where the platform withholds it.
 bool gpu_peer_access();

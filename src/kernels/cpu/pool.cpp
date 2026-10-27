@@ -2,6 +2,7 @@
 #include "basalt/kernels/cpu/pool.hpp"
 #include "basalt/core/progress.hpp"
 #include "basalt/kernels/cpu/expert_layout.hpp"
+#include "basalt/platform/system.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -124,6 +125,7 @@ void ExpertPool::publish() {
 }
 
 void ExpertPool::worker(int id) {
+    platform::keep_thread_full_speed();
     uint32_t seen = 0;
     // ARRIVE at the park before the first wait, so `parked_ == n_` is true from construction.  Counting only
     // on the RETURN from a drain leaves `parked_` at 0 until each worker has finished one batch, and the first

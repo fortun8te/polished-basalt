@@ -99,6 +99,28 @@ std::string python_interpreter(const std::string& src_dir) {
 
 void prefer_oom_victim() {}
 
+FullSpeed keep_full_speed(unsigned* os_error) {
+    if (!fork_switch("ECOQOS")) return FullSpeed::Disabled;
+    PROCESS_POWER_THROTTLING_STATE s{};
+    s.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    s.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;   // the process sets its execution speed itself
+    s.StateMask = 0;                                            // and it is never lowered
+    const bool ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s, sizeof s) != 0;
+    *os_error = ok ? 0u : (unsigned) GetLastError();
+    keep_thread_full_speed();
+    return ok ? FullSpeed::Set : FullSpeed::Refused;
+}
+
+void keep_thread_full_speed() {
+    static const bool on = fork_switch("ECOQOS");
+    if (!on) return;
+    THREAD_POWER_THROTTLING_STATE s{};
+    s.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    s.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    s.StateMask = 0;
+    (void) SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &s, sizeof s);
+}
+
 bool gpu_peer_access() { return false; }
 
 bool stderr_is_terminal() {
@@ -150,6 +172,13 @@ std::string python_interpreter(const std::string& src_dir) {
 void prefer_oom_victim() {
     if (std::FILE* f = std::fopen("/proc/self/oom_score_adj", "w")) { std::fputs("1000", f); std::fclose(f); }
 }
+
+FullSpeed keep_full_speed(unsigned* os_error) {   // the scheduler does not slow a process for its window's state
+    *os_error = 0;
+    return FullSpeed::NotNeeded;
+}
+
+void keep_thread_full_speed() {}
 
 bool gpu_peer_access() { return true; }
 

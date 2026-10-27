@@ -10,6 +10,10 @@
 #include <fstream>
 #include <string>
 
+#if defined(_WIN32)
+#include "basalt/platform/win.hpp"
+#endif
+
 namespace {
 int failures = 0;
 void check(bool ok, const std::string& what) {
@@ -49,6 +53,22 @@ int main() {
     check(!fork_switch("SYSTEM_TEST_OFF"), "fork_switch is off when the variable is 0");
     check(fork_switch("SYSTEM_TEST_ON"), "and on when it is 1");
     check(fork_switch("SYSTEM_TEST_UNSET"), "and on when it is not set");
+
+    unsigned os_error = 0;
+    const FullSpeed fs = keep_full_speed(&os_error);
+    check(fs == FullSpeed::NotNeeded || fs == FullSpeed::Set || (fs == FullSpeed::Disabled && !fork_switch("ECOQOS")),
+          "keep_full_speed is accepted where the OS slows background processes, and not needed elsewhere");
+    keep_thread_full_speed();   // best effort; the call must not fail
+#if defined(_WIN32)
+    if (fs == FullSpeed::Set) {
+        PROCESS_POWER_THROTTLING_STATE st{};
+        st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        const bool got = GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof st) != 0;
+        check(got && (st.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0 &&
+                  (st.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == 0,
+              "and the OS reads it back as controlled by the process and never lowered");
+    }
+#endif
 
     (void) gpu_peer_access();
     const DynLib nvml = DynLib::open_nvml();

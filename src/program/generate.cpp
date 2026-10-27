@@ -1086,6 +1086,22 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "serve") == 0) return serve_subcommand(argc, argv);
     // if memory runs out the kernel ends this process first, not the rest of the machine
     basalt::platform::prefer_oom_victim();
+    // the CPU expert pool keeps its speed while the window is in the background
+    {
+        unsigned os_error = 0;
+        switch (basalt::platform::keep_full_speed(&os_error)) {
+            case basalt::platform::FullSpeed::Set:
+                basalt::log::info("basalt generate", "full-speed scheduling: power throttling is off for this process");
+                break;
+            case basalt::platform::FullSpeed::Refused:
+                basalt::log::warn("basalt generate", "full-speed scheduling refused (error %u): decode slows while the window is in the background", os_error);
+                break;
+            case basalt::platform::FullSpeed::Disabled:
+                basalt::log::info("basalt generate", "full-speed scheduling is off (BASALT_FORK_ECOQOS=0)");
+                break;
+            case basalt::platform::FullSpeed::NotNeeded: break;
+        }
+    }
     // Kernels load on first use: loading every kernel of the engine and of cuBLAS at context creation holds a few
     // hundred MiB of device memory for code that never runs.  The expert cache's sizing keeps back room for what loads
     // later (`kLazyKernelsMib`).  CUDA_MODULE_LOADING=EAGER restores the up-front load; batched serving sets it (below).
