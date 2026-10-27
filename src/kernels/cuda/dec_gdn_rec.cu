@@ -442,9 +442,9 @@ static int mapped_heads(const DecRecArgs& a) {
     return a.nk * (a.h_v / a.h_k);
 }
 
-// BASALT_FORK_GDN_REC2: two value heads per block (bitwise the same outputs), when the head count is even
+// BASALT_FORK_GDN_REC2=1 (opt-in, not yet run on hardware): two value heads per block (bitwise the same outputs), when the head count is even
 static bool rec_pair_on() {
-    static const bool on = basalt::platform::fork_switch("GDN_REC2");
+    static const bool on = basalt::platform::fork_opt_in("GDN_REC2");
     return on;
 }
 
