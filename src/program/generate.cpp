@@ -7978,7 +7978,7 @@ int main(int argc, char** argv) {
                 sl.produced += k;
                 if (real) {   // the window's verdict on its drafts: the draft-length rule, the lookup history, the policy
                     const int a = k - 1, Tw = lens[sg];
-                    if (Tw > 1 && !sl.from_sfx) sl.cum.observe(sl.dprob, Tw - 1, a);
+                    sl.cum.observe_batch_window(sl.dprob, Tw, a, sl.from_sfx);
                     if (Tw > 1) sl.acc = 0.8 * sl.acc + 0.2 * ((double) a / (double) (Tw - 1));
                     sl.drafts_offered += Tw - 1;
                     sl.drafts_accepted += a;

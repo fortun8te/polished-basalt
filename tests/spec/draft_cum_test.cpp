@@ -215,6 +215,41 @@ int main() {
         for (int w = 0; w < 300; ++w) e.note_misses(3, 0, 40);   // everything in VRAM
         check(e.trend.scale == 1.0f && std::isfinite(e.th()), "no CPU misses at all: no change, no NaN");
     }
+    {
+        // Exercise the same observation seam as the batch slot after acceptance drops its window to one token.
+        const float borderline[8] = {0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f};
+        DraftCumAdapt a;
+        a.ramp = true;
+        a.miss_aware = false;
+        for (int w = 0; w < 40; ++w) a.observe_batch_window(borderline, 2, 0, false);
+        const DraftCumAdapt raised = a;
+        check(window_len(borderline, 8, a.th()) == 1, "batch: poor acceptance reaches a no-draft window");
+        for (int w = 0; w < 60; ++w) a.observe_batch_window(nullptr, 1, 0, false);
+        check(a.th() < raised.th(), "batch: no-draft windows lower the raised threshold");
+        check(window_len(borderline, 8, a.th()) > 1, "batch: recovery allows a draft again");
+
+        DraftCumAdapt suffix = raised;
+        for (int w = 0; w < 60; ++w) {
+            suffix.observe_batch_window(nullptr, 1, 0, true);
+            suffix.observe_batch_window(borderline, 4, 3, true);
+        }
+        check(suffix.obs == raised.obs && suffix.exp == raised.exp && suffix.cur == raised.cur,
+              "batch: suffix windows leave the MTP threshold and evidence unchanged");
+
+        DraftCumAdapt disabled = raised;
+        disabled.ramp = false;
+        for (int w = 0; w < 60; ++w) disabled.observe_batch_window(nullptr, 1, 0, false);
+        check(disabled.obs == raised.obs && disabled.exp == raised.exp && disabled.cur == raised.cur,
+              "batch: disabled ramp preserves no-draft behavior");
+
+        DraftCumAdapt direct = raised, batch = raised;
+        for (int accepted : {0, 1, 2, 3}) {
+            direct.observe(borderline, 3, accepted);
+            batch.observe_batch_window(borderline, 4, accepted, false);
+        }
+        check(batch.obs == direct.obs && batch.exp == direct.exp && batch.cur == direct.cur,
+              "batch: drafted windows retain the same acceptance update");
+    }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
 }

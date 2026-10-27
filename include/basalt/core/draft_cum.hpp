@@ -107,6 +107,11 @@ struct DraftCumAdapt {
         if (miss_aware && layers > 0 && misses >= 0) trend.observe(t, (double) misses / (double) layers);
     }
 
+    /// A batch slot's verified window; suffix proposals do not update the MTP acceptance rule.
+    void observe_batch_window(const float* probs, int tokens, int accepted, bool from_suffix) {
+        if (tokens > 0 && !from_suffix) observe(probs, tokens - 1, accepted);
+    }
+
     /// One verified window of the MTP chain: `n` drafts were offered with probabilities probs[0..n), `acc` accepted.
     void observe(const float* probs, int n, int acc) {
         constexpr double kDecay = 0.97, kRlo = 0.9, kRhi = 1.1, kRmin = 0.7, kIdle = 0.95;
