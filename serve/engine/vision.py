@@ -143,7 +143,12 @@ def _read_file(source: str, sources: ImageSources) -> bytes:
         raise ValueError("the image file does not exist")
     if real.stat().st_size > sources.max_bytes:
         raise ValueError(f"the image is larger than {sources.max_bytes} bytes")
-    return real.read_bytes()
+    # Bound the read too: the file may grow after the size check.
+    with real.open("rb") as stream:
+        data = stream.read(sources.max_bytes + 1)
+    if len(data) > sources.max_bytes:
+        raise ValueError(f"the image is larger than {sources.max_bytes} bytes")
+    return data
 
 
 def load_image(source: str, sources: ImageSources | None = None) -> bytes:
@@ -286,11 +291,16 @@ class Vision:
             im = bg
         elif im.mode != "RGB":
             im = im.convert("RGB")
-        out = io.BytesIO()
-        im.save(out, format="PNG")
-        if out.tell() > IMAGE_MAX_BYTES:                 # the file the encoder is given is capped like any other
-            raise ValueError(f"the image is larger than {IMAGE_MAX_BYTES >> 20} MiB once converted to PNG")
-        return out.getvalue()
+        class BoundedOutput(io.BytesIO):
+            def write(self, data):
+                # Refuse before BytesIO grows, including a write after a seek.
+                if self.tell() + len(data) > IMAGE_MAX_BYTES:
+                    raise ValueError(f"the image is larger than {IMAGE_MAX_BYTES >> 20} MiB once converted to PNG")
+                return super().write(data)
+
+        with BoundedOutput() as out:
+            im.save(out, format="PNG")
+            return out.getvalue()
 
     def encode(self, sources: list[str]) -> tuple[Path, list[int]]:
         """Encode a request's images into one embeddings file; return it and each image's token count."""

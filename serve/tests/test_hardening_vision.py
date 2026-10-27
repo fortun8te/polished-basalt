@@ -1,8 +1,10 @@
 """Image limits the pixel budget and the source policy leave open: a side, the converted file, and the C++ constants."""
 import io
 import re
+import tempfile
+from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from serve import ROOT
 from serve.engine import vision
@@ -54,6 +56,64 @@ class ConvertedFileTest(unittest.TestCase):
             self.assertEqual(len(Vision.normalize(self.tiff_image())), size)
         with patch.object(vision, "IMAGE_MAX_BYTES", size - 1), self.assertRaises(ValueError):
             Vision.normalize(self.tiff_image())
+
+
+    def test_conversion_stops_before_oversized_chunk_is_stored(self):
+        from PIL import Image
+        data = self.tiff_image()
+        reached_after_write = []
+
+        def save(image, output, **kwargs):
+            self.assertEqual(kwargs["format"], "PNG")
+            output.write(b"abcd")
+            try:
+                output.write(b"efghi")
+            finally:
+                self.assertEqual(output.getvalue(), b"abcd")
+            reached_after_write.append(True)
+
+        with patch.object(vision, "IMAGE_MAX_BYTES", 8), patch.object(Image.Image, "save", save):
+            with self.assertRaisesRegex(ValueError, "once converted"):
+                Vision.normalize(data)
+        self.assertEqual(reached_after_write, [])
+
+
+class GrowingFileTest(unittest.TestCase):
+    def test_file_growing_after_stat_is_read_with_a_bound_and_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "image"
+            path.write_bytes(b"abcd")
+            opened, reads = [], []
+            original_open = Path.open
+
+            def grow_then_open(candidate, *args, **kwargs):
+                # Simulate another writer after the size check, before the read.
+                with original_open(candidate, "ab") as writer:
+                    writer.write(b"e" * 100)
+                stream = original_open(candidate, *args, **kwargs)
+                opened.append(stream)
+                wrapper = Mock(wraps=stream)
+                wrapper.read.side_effect = lambda count=-1: (reads.append(count), stream.read(count))[1]
+                class Context:
+                    def __enter__(self):
+                        return wrapper
+                    def __exit__(self, *unused):
+                        stream.close()
+                return Context()
+
+            with patch.object(Path, "open", grow_then_open):
+                with self.assertRaisesRegex(ValueError, "larger than 4 bytes"):
+                    vision.load_image(str(path), vision.ImageSources(dirs=(root,), max_bytes=4))
+            self.assertEqual(reads, [5])
+            self.assertTrue(opened and all(stream.closed for stream in opened))
+
+    def test_allowed_file_at_limit_still_loads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "image"
+            path.write_bytes(b"abcd")
+            self.assertEqual(vision.load_image(str(path), vision.ImageSources(dirs=(root,), max_bytes=4)), b"abcd")
 
 
 class DecoderConstantsTest(unittest.TestCase):
