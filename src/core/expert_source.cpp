@@ -1162,6 +1162,26 @@ bool FileExpertSource::pin_cache_complement(
     if (register_after && !failed.load()) {
         constexpr size_t kHuge = 2ull << 20;
         const size_t padded = ((size_t) bytes + kHuge - 1) / kHuge * kHuge;
+        // page-locked memory held back for the buffers allocated after the copy (the slices below), halved down to 64 MiB
+        // when the driver has less to give
+        constexpr uint64_t kReserve = 1ull << 30;
+        // BASALT_FORK_PIN_HEADROOM: where the OS budgets page-locked memory (pin_budget), the reserve is held across the
+        // whole registration too, so a copy the driver takes up to its ceiling is refused (and taken in slices) instead of
+        // leaving nothing for those buffers
+        void* hold = nullptr;
+        uint64_t hold_bytes = 0;
+        uint64_t budget_seg = 0;
+        std::string budget_why;
+        if (basalt::platform::fork_switch("PIN_HEADROOM") && basalt::platform::pin_budget(budget_seg, budget_why)) {
+            for (uint64_t r = kReserve; r >= (64ull << 20) && hold == nullptr; r /= 2) {
+                if (cudaHostAlloc(&hold, (size_t) r, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) {
+                    hold_bytes = r;
+                } else {
+                    (void) cudaGetLastError();
+                    hold = nullptr;
+                }
+            }
+        }
         const cudaError_t reg = cudaHostRegister(arena, padded, cudaHostRegisterMapped | cudaHostRegisterPortable);
         void* alias = nullptr;
         if (reg == cudaSuccess && cudaHostGetDevicePointer(&alias, arena, 0) == cudaSuccess && alias != nullptr) {
@@ -1189,7 +1209,6 @@ bool FileExpertSource::pin_cache_complement(
                 // pin_budget.hpp).  So this much page-locked memory is held while the slices are registered and handed
                 // back after them; what of it the driver would not give is given back from the last slices after a
                 // refusal instead.
-                constexpr uint64_t kReserve = 1ull << 30;
                 std::vector<uint64_t> starts;
                 starts.reserve(offsets.size());
                 for (const uint64_t o : offsets)
@@ -1203,8 +1222,9 @@ bool FileExpertSource::pin_cache_complement(
                     detail::complement_pin_slices(std::move(starts), (uint64_t) padded, kSliceAlign, kSliceBytes);
                 const size_t n_slices = cuts.size() - 1;
                 // (one slice would be the very range just refused: no place starts on a boundary to cut it at)
-                void* held = nullptr;
-                uint64_t held_bytes = 0;
+                void* held = hold;   // (taken before the whole registration, or not yet)
+                uint64_t held_bytes = hold_bytes;
+                hold = nullptr;
                 for (uint64_t r = kReserve; n_slices > 1 && r >= (64ull << 20) && held == nullptr; r /= 2) {
                     if (cudaHostAlloc(&held, (size_t) r, cudaHostAllocMapped | cudaHostAllocPortable) == cudaSuccess) {
                         held_bytes = r;
@@ -1275,6 +1295,7 @@ bool FileExpertSource::pin_cache_complement(
                 note += "; " + lr.note;
             }
         }
+        if (hold != nullptr) (void) cudaFreeHost(hold);   // the registration is done: the room is the engine's again
     }
     if (failed.load()) {
         err = fail_msg;
