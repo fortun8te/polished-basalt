@@ -324,10 +324,14 @@ def _tool_list(value, wrapper: str | None) -> list[dict]:
     except ValueError:
         raise ValueError(f"tools must be a list of tool objects, each {shape}") from None
     key = "parameters" if wrapper else "input_schema"
+    names = set()
     for i, t in enumerate(tools):
         fn = t.get(wrapper, t) if wrapper and t.get("type") == wrapper else t
         if not isinstance(fn, dict) or not isinstance(fn.get("name"), str) or not fn["name"]:
             raise ValueError(f"tools[{i}] has no name: each tool must be {shape}")
+        if fn["name"] in names:
+            raise ValueError(f"tools[{i}]: duplicate tool name {fn['name']!r}")
+        names.add(fn["name"])
         schema = fn.get(key)
         if schema is not None and not isinstance(schema, dict):
             raise ValueError(f'tools[{i}] ({fn["name"]}): "{key}" must be an object (the JSON schema of its '
@@ -359,6 +363,9 @@ def _order_chat_tool_results(messages: list[dict]) -> None:
             call.pop("_call_id", None)
 
 
+order_tool_results = _order_chat_tool_results   # fork callers (responses API); upstream keeps received order when IDs are ambiguous
+
+
 def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     """OpenAI Chat Completions -> (template messages, template tools, template kwargs)."""
     messages = []
@@ -382,6 +389,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
                     args = json.loads(args) if args.strip() else {}
                 calls.append({"function": {"name": fn.get("name"), "arguments": args or {}}, "_call_id": c.get("id")})
             out["tool_calls"] = calls
+        if role == "tool":
+            out["_call_id"] = m.get("tool_call_id")
         messages.append(out)
     _order_chat_tool_results(messages)
     tools = [t.get("function", t) if t.get("type") == "function" else t
@@ -450,9 +459,11 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "thinking":
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
-                calls.append({"function": {"name": block.get("name"), "arguments": block.get("input") or {}}})
+                calls.append({"function": {"name": block.get("name"), "arguments": block.get("input") or {}},
+                              "_call_id": block.get("id")})
             elif kind == "tool_result":
-                messages.append({"role": "tool", "content": _text_of(block.get("content"))})
+                messages.append({"role": "tool", "content": _text_of(block.get("content")),
+                                 "_call_id": block.get("tool_use_id")})
         if text or calls or reasoning:
             out = {"role": m["role"], "content": "".join(text)}
             if reasoning:
@@ -460,6 +471,7 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             if calls:
                 out["tool_calls"] = calls
             messages.append(out)
+    order_tool_results(messages)
     tools = [{"name": t["name"], "description": t.get("description", ""), "parameters": t.get("input_schema", {})}
              for t in _tool_list(req.get("tools"), None)] or None
     kwargs = {}
@@ -646,16 +658,27 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     if not body.startswith("<function=") or ">" not in body:
         raise ValueError("malformed tool call: " + body[:80])
     name = body[len("<function="):body.index(">")]
+    if not name or any(c in name for c in "<>\r\n"):
+        raise ValueError("malformed tool call name")
     rest = body[body.index(">") + 1:]
     props = ((schema or {}).get("parameters") or {}).get("properties") or {}
     args = {}
-    while "<parameter=" in rest:
-        rest = rest[rest.index("<parameter=") + len("<parameter="):]
+    while True:
+        rest = rest.lstrip()
+        if rest == FUNC_END:
+            break
+        if not rest.startswith("<parameter=") or ">" not in rest:
+            raise ValueError("malformed tool call body")
+        rest = rest[len("<parameter="):]
         pname = rest[:rest.index(">")]
+        if not pname or any(c in pname for c in "<>\r\n") or pname in args:
+            raise ValueError("malformed or duplicate tool parameter")
         rest = rest[rest.index(">") + 1:]
         end = param_end(rest, final=True)
-        value = rest[:end] if end >= 0 else rest
-        rest = rest[end + len(PARAM_END):] if end >= 0 else ""
+        if end < 0:
+            raise ValueError("unterminated tool parameter")
+        value = rest[:end]
+        rest = rest[end + len(PARAM_END):]
         if value.startswith("\n"):
             value = value[1:]
         if value.endswith("\n"):
@@ -722,11 +745,15 @@ class OutputParser:
         while True:
             rest = self.buf[self.sp:]
             if self.ss == "name":
-                a = rest.find("<function=")
+                a = len(rest) - len(rest.lstrip())
+                if not rest[a:].startswith("<function="):
+                    return out
                 b = rest.find(">", a + 10) if a >= 0 else -1
                 if b < 0:
                     return out
                 name = rest[a + 10:b]
+                if name not in self.schemas:
+                    return out
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
                 self.sdeclared = props
@@ -753,7 +780,6 @@ class OutputParser:
                     else:
                         self.ss = "raw"
                 elif stripped.startswith("</function>"):
-                    args("}")
                     self.sp += len("</function>")
                     self.ss = "done"
                 else:
@@ -797,21 +823,6 @@ class OutputParser:
                 self.ss = "between"
             else:
                 return out
-
-    def _close_scan(self) -> list[Event]:
-        """Close the JSON of a streamed call that ended without a clean </function>."""
-        out = []
-        if self.scall is None or self.ss == "done":
-            return out
-        tail = ""
-        if self.ss == "str":
-            tail += '"'
-        elif self.ss == "raw":
-            tail += json.dumps(self.buf[self.sp:].strip("\n"))
-        tail += "}"
-        out.append(Event("tool_args", tail, call=self.scall))
-        self.ss = "done"
-        return out
 
     def _reasoning(self, text: str) -> Event:
         """A reasoning event for text going out; remembers its last character for the quote check."""
@@ -898,20 +909,29 @@ class OutputParser:
                 self.state = "call"
             else:
                 i = call_end(self.buf)
-                if self.stream_tools:
-                    if i >= 0:
-                        whole, self.buf = self.buf, self.buf[:i]     # scan only the body
-                        out += self._scan()
-                        out += self._close_scan()
-                        self.buf = whole
-                    else:
-                        out += self._scan()
+                if self.stream_tools and i < 0:
+                    out += self._scan()
                 if i < 0:
                     return out
                 body = self.buf[:i]
                 self.buf = self.buf[i + len(CALL_END):]
                 name = body.strip()[len("<function="):].split(">", 1)[0]
-                call = parse_tool_call(body, self.schemas.get(name))
+                try:
+                    if name not in self.schemas:
+                        raise ValueError("undeclared tool")
+                    call = parse_tool_call(body, self.schemas[name])
+                except ValueError:
+                    if self.scall is None:
+                        out.append(Event("content", self._track(CALL_START + body + CALL_END)))
+                    self._reset_scan()
+                    self.state, self.lead = "content", True
+                    continue
+                if self.stream_tools:
+                    remaining, self.buf = self.buf, body
+                    out += self._scan()
+                    self.buf = remaining
+                    if self.scall is not None:
+                        out.append(Event("tool_args", "}", call=self.scall))
                 if self.scall is not None:
                     call.id = self.scall.id
                 out.append(Event("tool_call", call=call))
@@ -924,8 +944,6 @@ class OutputParser:
         out = []
         if self.state == "call" and self.stream_tools and self.scall is not None:
             out += self._scan()                 # ended inside an announced call
-            if self.ss == "done":               # only </tool_call> is missing
-                out.append(Event("tool_call", call=self.scall))
             self.buf = ""
             self._reset_scan()
             return out
