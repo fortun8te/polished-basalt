@@ -612,6 +612,8 @@ HOP = frozenset(("connection", "keep-alive", "proxy-authenticate", "proxy-author
 REASONS = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 413: "Payload Too Large",
            431: "Request Header Fields Too Large", 500: "Internal Server Error", 502: "Bad Gateway"}
 CHUNK = 65536
+HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+HEX_SIZE = re.compile(rb"^[0-9A-Fa-f]+$")
 
 
 class BadRequest(Exception):
@@ -658,7 +660,7 @@ def parse_head(raw: bytes) -> tuple[str, list]:
         if not line:
             continue
         name, sep, value = line.partition(":")
-        if not sep or not name or name != name.strip():
+        if not sep or not HEADER_NAME.fullmatch(name) or any(ord(c) < 32 and c != "\t" or ord(c) == 127 for c in value):
             raise BadRequest(400, "malformed header line")
         headers.append((name, value.strip()))
     return lines[0], headers
@@ -679,17 +681,30 @@ async def iter_chunked(reader: asyncio.StreamReader, limit: int | None = None):
     """The payload pieces of a chunked body, as they arrive; the trailer is read and dropped."""
     total = 0
     while True:
-        line = await reader.readline()
-        if not line.endswith(b"\n"):
-            raise asyncio.IncompleteReadError(line, None)
         try:
-            size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+            line = await reader.readline()
         except ValueError:
-            raise BadRequest(400, "bad chunk size") from None
+            raise BadRequest(431, "chunk line too large") from None
+        if not line.endswith(b"\r\n"):
+            raise BadRequest(400, "bad chunk size line")
+        number = line[:-2].split(b";", 1)[0]
+        if not HEX_SIZE.fullmatch(number):
+            raise BadRequest(400, "bad chunk size")
+        size = int(number, 16)
         if size == 0:
-            while (await reader.readline()) not in (b"\r\n", b"\n", b""):
-                pass
-            return
+            trailer_bytes = 0
+            while True:
+                try:
+                    line = await reader.readline()
+                except ValueError:
+                    raise BadRequest(431, "chunk trailer too large") from None
+                trailer_bytes += len(line)
+                if not line.endswith(b"\r\n"):
+                    raise BadRequest(400, "truncated chunk trailer")
+                if trailer_bytes > 2 ** 18:
+                    raise BadRequest(431, "chunk trailer too large")
+                if line == b"\r\n":
+                    return
         total += size
         if limit is not None and total > limit:
             raise BadRequest(413, "request body too large")
@@ -699,7 +714,8 @@ async def iter_chunked(reader: asyncio.StreamReader, limit: int | None = None):
                 raise asyncio.IncompleteReadError(b"", size)
             size -= len(piece)
             yield piece
-        await reader.readexactly(2)
+        if await reader.readexactly(2) != b"\r\n":
+            raise BadRequest(400, "bad chunk terminator")
 
 
 async def read_request(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, max_body: int) -> Request:
@@ -711,18 +727,22 @@ async def read_request(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     if not target.startswith("/"):
         raise BadRequest(400, "send origin-form request targets (a path)")
     req = Request(method, target, version, headers, b"")
-    te = req.get("transfer-encoding").lower()
-    length = req.get("content-length")
+    transfers = [v for k, v in headers if k.lower() == "transfer-encoding"]
+    lengths = [v for k, v in headers if k.lower() == "content-length"]
+    if len(transfers) > 1 or len(lengths) > 1 or (transfers and lengths):
+        raise BadRequest(400, "ambiguous request framing")
+    te = transfers[0].lower() if transfers else ""
+    length = lengths[0] if lengths else ""
     if req.get("expect").lower() == "100-continue":
         writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
         await writer.drain()
     try:
         if te:
-            if te.split(",")[-1].strip() != "chunked":
+            if te.strip() != "chunked":
                 raise BadRequest(400, "unsupported transfer encoding")
             req.body = b"".join([p async for p in iter_chunked(reader, max_body)])
-        elif length:
-            if not length.isdigit():
+        elif lengths:
+            if not length.isascii() or not length.isdigit() or len(length) > 20:
                 raise BadRequest(400, "bad Content-Length")
             if int(length) > max_body:
                 raise BadRequest(413, "request body too large")
@@ -816,8 +836,9 @@ def request_bytes(req: Request, target: Target, body: bytes, drop: tuple = (), a
     """The request as sent upstream: the client's headers (hop-by-hop ones and `drop` removed), the target's Host, the
     body's own length, one-shot connection, then the headers in `add`."""
     skip = set(HOP) | {"host", "content-length", "expect"} | set(drop)
-    for token in req.get("connection").split(","):
-        skip.add(token.strip().lower())
+    for key, value in req.headers:
+        if key.lower() == "connection":
+            skip.update(token.strip().lower() for token in value.split(","))
     lines = [f"{req.method} {target.base}{req.target} HTTP/1.1", f"Host: {target.authority}"]
     lines += [f"{k}: {v}" for k, v in req.headers if k.lower() not in skip]
     lines += [f"{k}: {v}" for k, v in add or []]
@@ -833,13 +854,24 @@ async def read_response_head(reader: asyncio.StreamReader) -> tuple[int, str, li
             raw = await read_head(reader)
         except (ConnectionClosed, BadRequest):
             raise UpstreamError("upstream closed the connection before answering") from None
-        start, headers = parse_head(raw)
+        try:
+            start, headers = parse_head(raw)
+        except BadRequest:
+            raise UpstreamError("upstream sent malformed headers") from None
         parts = start.split(" ", 2)
-        if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+        if (len(parts) < 2 or parts[0] not in ("HTTP/1.0", "HTTP/1.1") or
+                len(parts[1]) != 3 or not parts[1].isascii() or not parts[1].isdigit() or
+                any(ord(c) < 32 or ord(c) == 127 for c in start)):
             raise UpstreamError("upstream sent a malformed response")
         status = int(parts[1])
         if status < 200 and status != 101:
             continue                                    # interim response
+        transfers = [v for k, v in headers if k.lower() == "transfer-encoding"]
+        lengths = [v for k, v in headers if k.lower() == "content-length"]
+        if (status == 101 or len(transfers) > 1 or len(lengths) > 1 or (transfers and lengths) or
+                (transfers and transfers[0].strip().lower() != "chunked") or
+                (lengths and (not lengths[0].isascii() or not lengths[0].isdigit() or len(lengths[0]) > 20))):
+            raise UpstreamError("upstream sent ambiguous response framing")
         return status, parts[2] if len(parts) > 2 else "", headers
 
 

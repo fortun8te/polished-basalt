@@ -475,3 +475,49 @@ def test_every_request_leaves_structured_log_lines(upstream, proxy):
     assert e["id"] == d["id"] == evts["admit"]["id"] and e["cls"] == "background" and e["rule"] == "small-model"
     assert d["outcome"] == "ok" and int(d["run_ms"]) >= 0 and re.fullmatch(r"[0-9a-f]{16}", e["prefix"])
     assert all(ln.startswith("ts=") and "\n" not in ln for ln in proxy.proxy.lines)
+
+@pytest.mark.parametrize("headers,body", [
+    (b"Content-Length: 2\r\nContent-Length: 4\r\n", b"{}xx"),
+    (b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", b"0\r\n\r\n"),
+    (b"Transfer-Encoding: gzip, chunked\r\n", b"0\r\n\r\n"),
+    (b"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n", b"0\r\n\r\n"),
+    (b"Content-Length: \r\n", b""),
+    (b"Content-Length: " + b"9" * 5000 + b"\r\n", b""),
+    (b"Transfer-Encoding: chunked\r\n", b"-1\r\n"),
+    (b"Transfer-Encoding: chunked\r\n", b"1\r\nxZZ0\r\n\r\n"),
+    (b"Transfer-Encoding: chunked\r\n", b"\r\n"),
+    (b"Bad Header: value\r\n", b""),
+    (b"X-Test: value\rbroken\r\n", b""),
+])
+def test_ambiguous_or_malformed_requests_are_rejected_before_forwarding(upstream, proxy, headers, body):
+    head = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n" + headers + b"\r\n"
+    c = proxy.post(body, raw_head=head)
+    c.wait()
+    assert c.status == 400
+    assert upstream.requests == []
+
+
+def test_all_connection_header_tokens_are_removed_before_forwarding(upstream, proxy):
+    body = chat_body("CONNECTION", stream=False)
+    head = (b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
+            b"Connection: keep-alive\r\nConnection: x-secret\r\nX-Secret: private\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode())
+    finish(proxy.post(body, raw_head=head))
+    seen = {k.lower(): v for k, v in upstream.by_tag("CONNECTION").headers}
+    assert "x-secret" not in seen
+    assert seen["connection"] == "close"
+
+
+@pytest.mark.parametrize("response", [
+    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 4\r\n\r\n{}xx",
+    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nInvalid Header: x\r\n\r\n",
+])
+def test_bad_upstream_framing_returns_502_and_releases_slot(upstream, proxy, response):
+    c = proxy.post(chat_body("BAD", stream=False, mock={"raw_response": response}))
+    c.wait()
+    assert c.status == 502
+    finish(proxy.post(chat_body("NEXT", stream=False)))
+    assert upstream.tags() == ["BAD", "NEXT"]
+    assert proxy.status()["inflight"] == 0
