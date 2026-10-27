@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import threading
@@ -136,6 +137,13 @@ TOOL_LITERAL_TAGS = {"</tool_call>": "\U000F0E07", "<tool_call>": "\U000F0E08", 
 LITERAL_TAGS = {**THINK_TAGS, **VISION_TAGS, **TOOL_LITERAL_TAGS}
 THINK_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
 CONTROL_MARK0 = 0xF0E10      # control-token marks start here
+ESCAPE = "\U000F0E00"         # precedes a mark character that was in the request, so it cannot pass for a mark
+
+
+@functools.lru_cache(maxsize=8)
+def _reserved(marks: tuple[str, ...]) -> re.Pattern:
+    """The characters a request may not carry unescaped: the escape and every mark."""
+    return re.compile("[" + "".join(map(re.escape, (ESCAPE, *marks))) + "]")
 
 
 def literal_tags(controls) -> dict[str, str]:
@@ -145,27 +153,33 @@ def literal_tags(controls) -> dict[str, str]:
     return dict(sorted(tags.items(), key=lambda t: -len(t[0])))
 
 
-def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS) -> str:
+def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS, keep=()) -> str:
+    """`text` with each tag but those in `keep` swapped for its mark, and a request's own mark characters escaped."""
+    text = _reserved(tuple(tags.values())).sub(ESCAPE + r"\g<0>", text)
     for tag, mark in tags.items():
-        text = text.replace(tag, mark)
+        if tag not in keep:
+            text = text.replace(tag, mark)
     return text
 
 
-def _mark_deep(v, tags: dict[str, str] = LITERAL_TAGS):
+def _mark_deep(v, tags: dict[str, str] = LITERAL_TAGS, keep=()):
+    """`v` with every string in it marked, the keys of its objects too: the template writes argument names and
+    renders nested keys into the prompt just as it does values."""
     if isinstance(v, str):
-        return _mark(v, tags)
+        return _mark(v, tags, keep)
     if isinstance(v, dict):
-        return {k: _mark_deep(x, tags) for k, x in v.items()}
+        return {_mark(k, tags, keep) if isinstance(k, str) else k: _mark_deep(x, tags, keep) for k, x in v.items()}
     if isinstance(v, list):
-        return [_mark_deep(x, tags) for x in v]
+        return [_mark_deep(x, tags, keep) for x in v]
     return v
 
 
 def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
+    """Whether a string in `v` (or a key of its objects) holds a tag, or a character that would pass for a mark."""
     if isinstance(v, str):
-        return any(tag in v for tag in tags)
+        return any(tag in v for tag in tags) or bool(_reserved(tuple(tags.values())).search(v))
     if isinstance(v, dict):
-        return any(_has_tag(x, tags) for x in v.values())
+        return any(_has_tag(k, tags) or _has_tag(x, tags) for k, x in v.items())
     if isinstance(v, list):
         return any(_has_tag(x, tags) for x in v)
     return False
@@ -205,20 +219,46 @@ def _keep_tool_result_wrap(content, tags: dict[str, str]):
             [{**content[-1], "text": wrap(texts[-1], False, True)}])
 
 
+def _is_text_item(item) -> bool:
+    """A content item the template writes as text (it tests image, then video, then text)."""
+    return (isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("type") not in ("image", "video")
+            and not any(k in item for k in ("image", "image_url", "video")))
+
+
+def _join_text_items(messages: list[dict]) -> list[dict]:
+    """Messages whose content lists hold adjacent text items get them as one item, since the template writes them
+    back to back: a tag split across two items is whole in the prompt, and must be seen whole. Images keep their
+    place between the texts. The same list comes back when nothing is adjacent."""
+    out, changed = [], False
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and any(_is_text_item(a) and _is_text_item(b) for a, b in zip(content, content[1:])):
+            joined = []
+            for item in content:
+                if joined and _is_text_item(item) and _is_text_item(joined[-1]):
+                    joined[-1] = {**joined[-1], "text": joined[-1]["text"] + item["text"]}
+                else:
+                    joined.append(item)
+            m, changed = {**m, "content": joined}, True
+        out.append(m)
+    return out if changed else messages
+
+
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
     """(messages, tools, changed) with literal tags in their text swapped for `tags`' marks; unchanged objects come
     back when there are none. An assistant message opening with a whole <think>...</think> block keeps it."""
+    messages = _join_text_items(messages)
     if not _has_tag(messages, tags) and not _has_tag(tools, tags):
         return messages, tools, False
     out = []
-    own = {t: v for t, v in tags.items() if t not in TOOL_LITERAL_TAGS}     # what an assistant message keeps as written
     for m in messages:
         m = dict(m)
         content = m.get("content")
-        mine = own if m.get("role") == "assistant" else tags
+        keep = TOOL_LITERAL_TAGS if m.get("role") == "assistant" else ()    # raw assistant content can replay calls
         for k, v in m.items():
             if k != "role":
-                m[k] = _mark_deep(v, mine)
+                # Structured call arguments are data; their enclosing tags come from the template.
+                m[k] = _mark_deep(v, tags, keep if k == "content" else ())
         if m.get("role") == "user":
             kept = _keep_tool_result_wrap(content, tags)
             if kept is not None:
@@ -226,36 +266,72 @@ def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: di
         if m.get("role") == "assistant" and isinstance(content, str) and content.lstrip().startswith("<think>") \
                 and "</think>" in content:
             i, j = content.index("<think>") + len("<think>"), content.index("</think>")
-            m["content"] = (content[:i] + _mark(content[i:j], own) + "</think>" +
-                            _mark(content[j + len("</think>"):], own))
+            m["content"] = (content[:i] + _mark(content[i:j], tags, keep) + "</think>" +
+                            _mark(content[j + len("</think>"):], tags, keep))
         out.append(m)
     return out, _mark_deep(tools, tags), True
 
 
-_THINK_MARK_RE = re.compile("|".join(THINK_MARKS))
+def _unmark_re(marks) -> re.Pattern:
+    return re.compile(re.escape(ESCAPE) + "(.)|" + "|".join(map(re.escape, marks)), re.DOTALL)
+
+
+_THINK_MARK_RE = _unmark_re(THINK_MARKS)
 
 
 def unmark_think_literals(prompt: str, tags: dict[str, str] = LITERAL_TAGS) -> tuple[str, list[tuple[int, int]]]:
     """The prompt with marks restored to tag text, and those tags' (start, end) spans to encode as plain text."""
     marks = THINK_MARKS if tags is LITERAL_TAGS else {v: k for k, v in tags.items()}
-    mark_re = _THINK_MARK_RE if tags is LITERAL_TAGS else re.compile("|".join(map(re.escape, marks)))
+    mark_re = _THINK_MARK_RE if tags is LITERAL_TAGS else _unmark_re(marks)
     out, spans, pos, n = [], [], 0, 0
     for m in mark_re.finditer(prompt):
         out.append(prompt[pos:m.start()])
         n += m.start() - pos
+        pos = m.end()
+        if m.group(1) is not None:                    # a character of the request that looks like a mark
+            out.append(m.group(1))
+            n += 1
+            continue
         tag = marks[m.group(0)]
         out.append(tag)
         spans.append((n, n + len(tag)))
         n += len(tag)
-        pos = m.end()
     out.append(prompt[pos:])
     return "".join(out), spans
 
 
 def _late_system_to_user(messages: list[dict]) -> list[dict]:
-    """Turn system messages after the first into user messages in place; the template allows system only first,
-    and merging would change the prompt start and lose the cache."""
+    """The leading run of system messages becomes one system message, its texts joined by a blank line. System
+    messages after it become user messages in place: the template allows system only first, and merging a later one
+    would change the prompt start and lose the cache."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system" and isinstance(messages[lead].get("content"), str):
+        lead += 1
+    if lead > 1:
+        messages = [{"role": "system", "content": "\n\n".join(m["content"] for m in messages[:lead])}, *messages[lead:]]
     return [dict(m, role="user") if m.get("role") == "system" and i > 0 else m for i, m in enumerate(messages)]
+
+
+def check_tag_name(name, what: str) -> None:
+    """A name the template writes between `<function=` / `<parameter=` and `>` holds neither `<` nor `>`: the output
+    parser ends it at the first `>`, and one ending in half a control token would be completed by the template's own
+    `>` into the real token."""
+    if isinstance(name, str) and ("<" in name or ">" in name):
+        raise ValueError(f"{what} {name!r} may not contain '<' or '>'")
+
+
+def check_call_names(messages: list[dict]) -> None:
+    """Refuse a replayed call whose function or argument name the call tags cannot carry (see check_tag_name)."""
+    for m in messages:
+        calls = m.get("tool_calls")
+        for c in calls if isinstance(calls, list) else ():
+            fn = c.get("function", c) if isinstance(c, dict) else None
+            if not isinstance(fn, dict):
+                continue
+            check_tag_name(fn.get("name"), "a tool call's function name")
+            args = fn.get("arguments")
+            for key in args if isinstance(args, dict) else ():
+                check_tag_name(key, f"an argument name of the call to {fn.get('name')}")
 
 
 def _object_list(value, name: str) -> list[dict]:
@@ -329,6 +405,7 @@ def _tool_list(value, wrapper: str | None) -> list[dict]:
         fn = t.get(wrapper, t) if wrapper and t.get("type") == wrapper else t
         if not isinstance(fn, dict) or not isinstance(fn.get("name"), str) or not fn["name"]:
             raise ValueError(f"tools[{i}] has no name: each tool must be {shape}")
+        check_tag_name(fn["name"], f"tools[{i}]: the tool name")
         if fn["name"] in names:
             raise ValueError(f"tools[{i}]: duplicate tool name {fn['name']!r}")
         names.add(fn["name"])

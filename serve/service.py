@@ -12,7 +12,8 @@ from typing import Iterator
 
 from serve.engine.errors import EngineDied, EngineSilent, EngineStartError, EngineStarting, EngineStuck, GpuBusy, ModelBusy
 from serve.engine.mock import Engine
-from serve.frontend import ChatTemplate, Event, OutputParser, images_of, literal_tags, mark_think_literals, unmark_think_literals
+from serve.frontend import (ChatTemplate, Event, OutputParser, check_call_names, images_of, literal_tags, mark_think_literals,
+                            unmark_think_literals)
 from serve.util.logbuf import LogBuffer
 from serve.security import LOOPBACK_NAMES
 from serve.prompt import CTX_SLACK, PromptText, overflow_error, room_error
@@ -513,6 +514,7 @@ class Service:
     def render_text(self, messages, tools, kwargs) -> tuple[str, list]:
         """The rendered prompt and the character spans in it where special-token text stays plain text: think tags
         and control-token text inside messages are text; only the template's own are special."""
+        check_call_names(messages)
         marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
         prompt = self.render_prompt(marked, marked_tools, kwargs)
         if not changed:
