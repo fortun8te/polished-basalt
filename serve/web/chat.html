@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Private chat</title>
+<style>
+:root{font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252823;background:#f7f7f2;color-scheme:light}
+*{box-sizing:border-box}body{margin:0}header,main,footer{max-width:800px;margin:auto;padding:20px 24px}
+header{display:flex;align-items:center;gap:16px;border-bottom:1px solid #dedfd7}header strong{font-size:18px}header a{color:#62675e;font-size:13px;margin-left:auto}
+button,select,textarea{font:inherit}button{border:1px solid #cfd2c7;border-radius:10px;padding:8px 14px;background:#fff;color:inherit;cursor:pointer}
+button:disabled{opacity:.45;cursor:default}main{padding-bottom:240px}#welcome{padding:12vh 0 5vh}h1{font-size:32px;font-weight:550;letter-spacing:-1px;margin:0 0 8px}p{margin:0;color:#697061}
+.message{margin:28px 0}.label{font-size:12px;color:#72796b;margin-bottom:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0}
+.user{background:#eaece2;padding:14px 18px;border-radius:14px;margin-left:8%}.assistant{padding:0 2px}details{margin:0 0 12px;color:#72796b;font-size:14px}summary{cursor:pointer}details pre{padding:10px 0;max-height:300px;overflow:auto}
+footer{position:fixed;bottom:0;left:0;right:0;background:linear-gradient(transparent,#f7f7f2 18px);padding-top:30px}form{background:white;border:1px solid #cfd2c7;border-radius:16px;padding:12px;box-shadow:0 3px 18px #22222206}
+textarea{display:block;width:100%;border:0;resize:vertical;min-height:56px;max-height:180px;outline:none;padding:4px 5px;background:transparent;color:inherit}.controls{display:flex;gap:8px;align-items:center}.controls label{font-size:13px;color:#697061}select{font-size:13px;border:0;background:transparent;color:inherit}#send{margin-left:auto;background:#43553b;color:white;border-color:#43553b}#status{font-size:12px;min-height:22px;padding:8px 4px;color:#697061}
+@media(max-width:600px){header,main,footer{padding-left:16px;padding-right:16px}h1{font-size:28px}.user{margin-left:3%}header a{display:none}}
+</style></head><body>
+<header><strong>Private chat</strong><a href="/">PC status</a><button id="new" type="button">New chat</button></header>
+<main id="messages"><section id="welcome"><h1>What are we working on?</h1><p>Ask a question, work through an idea, or paste something to review.</p></section></main>
+<footer><form id="form"><textarea id="prompt" aria-label="Your message" placeholder="Message your PC…" rows="2" required></textarea>
+<div class="controls"><label for="effort">Thinking</label><select id="effort"><option value="high">More</option><option value="medium">Balanced</option><option value="low">Less</option></select>
+<button id="stop" type="button" hidden>Stop</button><button id="send" type="submit" disabled>Send</button></div></form>
+<div id="status" role="status" aria-live="polite">Connecting to your PC…</div></footer>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), history=[];
+let model='', controller=null;
+function status(text){$('status').textContent=text;}
+function busy(on){$('send').disabled=on||!model;$('stop').hidden=!on;$('new').disabled=on;$('effort').disabled=on;}
+function message(role,text=''){
+  $('welcome')?.remove();
+  const row=document.createElement('section');row.className='message '+role;
+  const label=document.createElement('div');label.className='label';label.textContent=role==='user'?'You':'Your PC';row.append(label);
+  let thought=null, detail=null;
+  if(role==='assistant'){
+    detail=document.createElement('details');detail.hidden=true;
+    const summary=document.createElement('summary');summary.textContent='Thinking';
+    const pre=document.createElement('pre');thought=document.createTextNode('');pre.append(thought);detail.append(summary,pre);row.append(detail);
+  }
+  const answer=document.createElement('pre'), node=document.createTextNode(text);answer.append(node);row.append(answer);$('messages').append(row);
+  return {node,thought,detail};
+}
+function parseEvent(block){
+  const data=block.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');
+  if(!data)return null;
+  return data.trim()==='[DONE]'?{done:true}:JSON.parse(data);
+}
+async function models(){
+  try{
+    const response=await fetch('/v1/models',{cache:'no-store'});
+    if(!response.ok)throw new Error(response.status===401?'This connection needs access. Open your saved private connection.':'Your PC is not ready yet. Refresh after it starts.');
+    const data=await response.json();model=data.data?.[0]?.id||'';
+    if(!model)throw new Error('The model is not ready. Refresh after it finishes loading.');
+    status('Ready · This chat stays in this tab.');busy(false);
+  }catch(error){status(error.message);}
+}
+$('new').onclick=()=>{history.length=0;$('messages').replaceChildren();status('New chat · This chat stays in this tab.');$('prompt').focus();};
+$('stop').onclick=()=>controller?.abort();
+$('prompt').onkeydown=event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();if(!controller&&model)$('form').requestSubmit();}};
+$('form').onsubmit=async event=>{
+  event.preventDefault();const text=$('prompt').value.trim();if(!text||controller||!model)return;
+  history.push({role:'user',content:text});message('user',text);$('prompt').value='';
+  const view=message('assistant');controller=new AbortController();busy(true);status('Thinking…');
+  let answer='',thoughtText='',finish=null,done=false,reader=null;
+  const apply=block=>{
+    const event=parseEvent(block);if(!event)return;
+    if(event.done){done=true;return;}
+    if(event.error)throw new Error(event.error.message||'Your PC could not finish this reply.');
+    for(const choice of event.choices||[]){
+      const delta=choice.delta||{},content=delta.content||'',thought=delta.reasoning_content||delta.reasoning||'';
+      if(typeof thought==='string'&&thought){view.detail.hidden=false;view.thought.appendData(thought);thoughtText+=thought;}
+      if(typeof content==='string'&&content){answer+=content;view.node.appendData(content);status('Replying…');}
+      if(choice.finish_reason)finish=choice.finish_reason;
+    }
+  };
+  try{
+    const response=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,
+      body:JSON.stringify({model,messages:history,stream:true,max_tokens:32768,reasoning_effort:$('effort').value,chat_template_kwargs:{enable_thinking:true}})});
+    if(!response.ok){let error={};try{error=await response.json();}catch{}throw new Error(error.error?.message||'Your PC could not start this reply.');}
+    if(!response.body)throw new Error('This browser could not read the reply.');
+    reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';
+    while(!done){
+      const part=await reader.read();buffer+=(part.done?decoder.decode():decoder.decode(part.value,{stream:true}));buffer=buffer.replace(/\r\n/g,'\n');
+      let split;while((split=buffer.indexOf('\n\n'))>=0){const block=buffer.slice(0,split);buffer=buffer.slice(split+2);apply(block);if(done)break;}
+      if(part.done){if(buffer.trim()&&!done)apply(buffer);break;}
+    }
+    status(finish==='length'?'Reply reached its limit. Ask me to continue.':finish==='stop'?'Ready · This chat stays in this tab.':'Connection ended. You can ask me to continue.');
+  }catch(error){status(error.name==='AbortError'?'Stopped.':error.message);}
+  finally{
+    if(reader){try{await reader.cancel();}catch{}}
+    if(answer)history.push({role:'assistant',content:answer,...(thoughtText?{reasoning_content:thoughtText}:{})});
+    controller=null;busy(false);$('prompt').focus();
+  }
+};
+models();
+</script></body></html>
