@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import collections
 import ctypes
+import ntpath
 import os
 import platform
 import sys
@@ -26,7 +27,12 @@ class _Nvml:
 
     def __init__(self, index=0):
         self.lib = self.dev = None
-        names = ["libnvidia-ml.so.1", "libnvidia-ml.so"]
+        if sys.platform == "win32":
+            roots = [(os.environ.get("SystemRoot"), ("System32",)),
+                     (os.environ.get("ProgramW6432"), ("NVIDIA Corporation", "NVSMI"))]
+            names = [ntpath.join(root, *parts, "nvml.dll") for root, parts in roots if root]
+        else:
+            names = ["libnvidia-ml.so.1", "libnvidia-ml.so"]
         for n in names:
             try:
                 self.lib = ctypes.CDLL(n)

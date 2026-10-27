@@ -13,6 +13,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -157,6 +158,30 @@ class Ranges(FetchCase):
         self.assertEqual(fetched, [("model-2.safetensors",) + Mirror.span("model-2.safetensors", "mtp.b")],
                          "mtp.a was right and is kept; mtp.b is fetched whole")
 
+    def test_pinned_index_cannot_omit_or_add_tensors(self):
+        for weight_map in ({"mtp.a": "model-1.safetensors"},
+                           {"mtp.a": "model-1.safetensors", "mtp.b": "model-2.safetensors",
+                            "mtp.extra": "model-1.safetensors"}):
+            with self.subTest(weight_map=weight_map), mock.patch.object(M, "get", return_value=json.dumps(
+                    {"weight_map": weight_map}).encode()), self.assertRaisesRegex(ValueError, "expected tensor names"):
+                M.inventory(str(self.out))
+
+    def test_cached_inventory_cannot_omit_or_duplicate_tensors(self):
+        self.fetch(Mirror())
+        inv_path = self.out / "mtp-inventory.json"
+        inv = json.loads(inv_path.read_text())
+        for rows in (inv["tensors"][:1], inv["tensors"] + inv["tensors"][:1]):
+            with self.subTest(rows=rows):
+                inv_path.write_text(json.dumps({"repo": M.REPO, "tensors": rows}))
+                with self.assertRaises(ValueError):
+                    self.fetch(Mirror())
+
+    def test_invalid_shard_and_tensor_paths_are_refused(self):
+        for row in ({"name": "mtp.a", "shard": "../evil"}, {"name": "mtp.a/../../evil", "shard": "a"}):
+            with self.subTest(row=row), mock.patch.object(M, "REPO", M.REPO.replace(M.PINNED_REVISION, "main")), \
+                    self.assertRaises(ValueError):
+                M.check_inventory_names([row])
+
     def test_verify_keeps_its_verdict_and_skips_other_revisions(self):
         self.fetch(Mirror())
         self.assertEqual(M.verify(str(self.out)), [])
@@ -169,6 +194,33 @@ class Ranges(FetchCase):
             self.assertEqual(M.verify(str(self.out)), [])          # --revision: other hashes
         self.assertEqual(M.verify(str(self.out)), ["mtp.a"])
         self.assertEqual(M.verify(str(self.out / "nothing")), [])
+
+
+class RevisionPolicy(FetchCase):
+    def test_missing_pinned_revision_never_falls_back_to_main(self):
+        calls = []
+        def missing(req, timeout=None):
+            calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, None)
+        with mock.patch.object(M.urllib.request, "urlopen", missing), \
+                mock.patch.object(sys, "argv", ["mtp_fetch", "inventory", "--out", str(self.out)]), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(urllib.error.HTTPError):
+            M.main()
+        self.assertTrue(calls)
+        self.assertTrue(all(M.PINNED_REVISION in url for url in calls))
+        self.assertEqual(M.REPO, M.PINNED)
+        self.assertFalse((self.out / "mtp-inventory.json").exists())
+
+    def test_explicit_override_uses_requested_revision(self):
+        mirror = Mirror()
+        with mock.patch.object(M, "REVISION", M.PINNED_REVISION), \
+                mock.patch.object(M.urllib.request, "urlopen", mirror), \
+                mock.patch.object(sys, "argv", ["mtp_fetch", "inventory", "--out", str(self.out),
+                                               "--revision", "main"]), contextlib.redirect_stdout(io.StringIO()):
+            M.main()
+            self.assertIn("/resolve/main/", M.REPO)
+            self.assertFalse(M.pinned())
+            self.assertEqual(json.loads((self.out / "mtp-inventory.json").read_text())["repo"], M.REPO)
 
 
 class Pinned(unittest.TestCase):
