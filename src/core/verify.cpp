@@ -8,6 +8,7 @@
 #include "basalt/core/gdn_head_split.hpp"
 #include "basalt/core/on_device.hpp"
 #include "basalt/platform/compiler.hpp"
+#include "basalt/platform/system.hpp"
 #include "basalt/core/peer_experts.hpp"
 #include "basalt/kernels/iq_kernels.hpp"
 #include "basalt/kernels/cpu/expert_layout.hpp"
@@ -749,7 +750,8 @@ bool Verifier::dm_init(std::string& err) {
     const bool one_card = d->pdev < 0 && d->xp.empty() && lb_ == 0 && le_ == g.n_layers && hand_in_ == nullptr &&
                           warm_src_ != nullptr && staging_ != nullptr;
     const bool ram_mapped = one_card && warm_src_->pcie_layer(0);
-    bool stage = ram_mapped;
+    const bool stage_allowed = basalt::platform::fork_switch("STAGING");   // BASALT_FORK_STAGING=0: no staged share
+    bool stage = ram_mapped && stage_allowed;
     int64_t blob = 0;
     for (int64_t l = 0; stage && l < g.n_layers; ++l) {
         stage = lay.fmt[(size_t) l].bytes % 16 == 0;
@@ -808,6 +810,7 @@ bool Verifier::dm_init(std::string& err) {
     } else if (one_card) {   // one card and a RAM copy, but no staged share
         basalt::log::info("basalt verify", "the staged share is off: %s",
                           !ram_mapped ? "the experts' RAM copy is not mapped into the GPU (not page-locked)"
+                          : !stage_allowed ? "BASALT_FORK_STAGING=0"
                           : !stage    ? "an expert blob is not a multiple of 16 bytes"
                           : stage_slots < 1 ? "no staging slot fits"
                                             : "no count of CPU misses pays for a copy at these costs");
