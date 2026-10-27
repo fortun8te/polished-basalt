@@ -1,0 +1,29 @@
+{
+  "server": {
+    "model": "C:/Users/pc-agent/AgentWorkspace/local-ai-20261026/models/basalt-compact/flashnext-iq3s-external-ple.basalt",
+    "host": "127.0.0.1",
+    "port": 18892,
+    "alias": "qwen3.8-flash-next-iq3_s",
+    "vision": "off"
+  },
+  "engine": {
+    "ple-gguf": "C:/Users/pc-agent/AgentWorkspace/local-ai-20261026/models/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+    "max-context": 262144,
+    "kv": "int8",
+    "kv-resident": 32768,
+    "expert-cache": "auto",
+    "prefill": "auto",
+    "resident-experts": true,
+    "vram-reserve-mib": 512,
+    "spec": 7,
+    "pool-workers": 5,
+    "prompt-cache": 6,
+    "conversation-cache-mib": 8192,
+    "conversation-cache-slots": 2,
+    "conversation-cache-min-tokens": 4096,
+    "ple-io": "ram",
+    "adapt-every": 1,
+    "adapt-swaps": 160,
+    "adapt-decay": 0.97
+  }
+}
