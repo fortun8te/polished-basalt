@@ -138,7 +138,10 @@ class MockUpstream:
             if ctl.get("gate"):
                 await pause(event=self._gate(ctl["gate"]))
             tag = rec.tag
-            if ctl.get("status"):
+            if "raw_response" in ctl:
+                writer.write(ctl["raw_response"].encode("latin-1"))
+                await writer.drain()
+            elif ctl.get("status"):
                 data = json.dumps({"error": {"type": "invalid_request_error", "message": ctl.get("error", "bad")}}).encode()
                 writer.write(b"HTTP/1.0 %d Error\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
                              % (ctl["status"], len(data), data))
