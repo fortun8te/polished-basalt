@@ -26,6 +26,8 @@ std::string python_interpreter(const std::string& src_dir);
 /// Whether the change switched by the environment variable BASALT_FORK_<name> is on: it is, unless the variable is
 /// set to "0". Read on each call, so a caller that asks in a hot path keeps the answer.
 bool fork_switch(const char* name);
+/// The opt-in twin of fork_switch for changes that are not proven on the hardware yet: true only when BASALT_FORK_<NAME>=1.
+bool fork_opt_in(const char* name);
 
 /// The number in the environment variable BASALT_FORK_<name> when it is one within [lo, hi]; `def` when the variable
 /// is unset, empty, not a number or outside the range.
