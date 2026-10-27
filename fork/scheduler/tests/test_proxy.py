@@ -231,15 +231,15 @@ def test_chunked_request_bodies_reach_the_upstream_whole(upstream, proxy):
 
 def test_expect_continue_is_answered_before_the_body_is_read(upstream, proxy):
     body = chat_body("EX", stream=False)
-    s = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
-    s.sendall(f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len(body)}\r\n"
-              "Expect: 100-continue\r\n\r\n".encode())
-    assert s.recv(100).startswith(b"HTTP/1.1 100 Continue")
-    s.sendall(body)
-    data = b""
-    while chunk := s.recv(65536):
-        data += chunk
-    assert data.startswith(b"HTTP/1.1 200") and upstream.tags() == ["EX"]
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=5) as s:
+        s.sendall(f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len(body)}\r\n"
+                  "Expect: 100-continue\r\n\r\n".encode())
+        assert s.recv(100).startswith(b"HTTP/1.1 100 Continue")
+        s.sendall(body)
+        data = b""
+        while chunk := s.recv(65536):
+            data += chunk
+        assert data.startswith(b"HTTP/1.1 200") and upstream.tags() == ["EX"]
 
 
 def test_other_paths_pass_straight_through_even_while_the_slot_is_busy(upstream, proxy):

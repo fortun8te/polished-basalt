@@ -51,7 +51,11 @@ class Client:
             hdrs.setdefault("Content-Length", str(len(body)))
         head = raw_head or (f"{method} {path} {version}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdrs.items())
                             + "\r\n").encode()
-        self.sock.sendall(head + body)
+        try:
+            self.sock.sendall(head + body)
+        except OSError:
+            self.sock.close()
+            raise
         self.t0 = time.monotonic()
         self.t_done = None
         self.thread = threading.Thread(target=self._read, daemon=True)
@@ -66,8 +70,10 @@ class Client:
                 self.raw += data
         except OSError:
             pass
-        self.t_done = time.monotonic()
-        self.finished.set()
+        finally:
+            self.sock.close()
+            self.t_done = time.monotonic()
+            self.finished.set()
 
     def abort(self):
         try:
