@@ -9,6 +9,7 @@
 #pragma once
 
 #include "basalt/core/diag.hpp"
+#include "basalt/platform/system.hpp"
 
 #include <cmath>
 
@@ -43,7 +44,9 @@ inline float& draft_cum_cpu_mb() { static float v = 0.0f; return v; }
 inline float draft_cum_scale() {
     constexpr float kLoMb = 1.1f, kHiMb = 3.5f, kMax = 1.5f;
     const float t = (draft_cum_cpu_mb() - kLoMb) / (kHiMb - kLoMb);
-    return 1.0f + (kMax - 1.0f) * (t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t);
+    // BASALT_FORK_DRAFT_CUM_MULT: a factor on the scale (1 = as is; below 1 proposes longer windows, above 1 shorter ones)
+    static const float mult = (float) basalt::platform::fork_number("DRAFT_CUM_MULT", 1.0, 0.25, 4.0);
+    return mult * (1.0f + (kMax - 1.0f) * (t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t));
 }
 inline float draft_cum_base() { return kDraftCumBase0 * draft_cum_scale(); }
 
