@@ -3,6 +3,7 @@
 #include "basalt/platform/dynlib.hpp"
 #include "basalt/platform/file.hpp"
 #include "basalt/platform/memory.hpp"
+#include "basalt/platform/process.hpp"
 #include "basalt/platform/system.hpp"
 
 #include <cstdio>
