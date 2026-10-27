@@ -1054,6 +1054,9 @@ if(BUILD_TESTING)
   add_executable(draft_cum_test tests/spec/draft_cum_test.cpp)
   target_link_libraries(draft_cum_test PRIVATE spec)   # include path and the platform switches
   basalt_cpu_test(NAME draft_cum_test COMMAND draft_cum_test)
+  add_executable(coupled_draft_test tests/spec/coupled_draft_test.cpp)
+  target_link_libraries(coupled_draft_test PRIVATE spec)   # include path and the platform switches
+  basalt_cpu_test(NAME coupled_draft_test COMMAND coupled_draft_test)
 endif()
 if(BUILD_TESTING)
   # the serve loop's conversation-cache retention policy (header-only, no library to link)
