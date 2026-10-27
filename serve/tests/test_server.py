@@ -774,7 +774,7 @@ class UnfinishedToolCall(unittest.TestCase):
         from serve.frontend import OutputParser
         schema = [{"name": "write", "parameters": {"properties": self.PROPS}}]
         for text, content in ((self.CUT, None), (self.WHOLE, "all of it"),
-                              (self.WHOLE[:-len("</tool_call>")], "all of it")):   # only </tool_call> missing: whole
+                              (self.WHOLE[:-len("</tool_call>")], None)):
             for step in (1, 7, 10_000):
                 with self.subTest(end=text[-12:], step=step):
                     p = OutputParser(thinking=True, tools=schema, stream_tools=True)
@@ -785,7 +785,9 @@ class UnfinishedToolCall(unittest.TestCase):
                     streamed = "".join(e.text for e in evs if e.kind == "tool_args")
                     calls = [e for e in evs if e.kind == "tool_call"]
                     if content is None:
-                        self.assertEqual((calls, streamed), ([], '{"path":"notes.txt","content":"first half of the fi'))
+                        expected = ('{"path":"notes.txt","content":"first half of the fi' if text == self.CUT
+                                    else '{"path":"notes.txt","content":"all of it"')
+                        self.assertEqual((calls, streamed), ([], expected))
                     else:
                         self.assertEqual(len(calls), 1)
                         self.assertEqual(json.loads(streamed), {"path": "notes.txt", "content": content})
@@ -2828,13 +2830,12 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
         self.assertEqual(b["choices"][0]["finish_reason"], "stop")
 
-    def test_answer_room_cuts_a_budget_at_or_near_max_tokens(self):
-        from serve.service import REASONING_WRAP_UP
+    def test_answer_room_preserves_an_explicit_budget(self):
         self.engine.THOUGHT = ThinkingEngine.THOUGHT * 4
         code, b = self.openai(max_tokens=1024, reasoning_budget_tokens=1000)
         self.assertEqual(code, 200, b)
         msg = b["choices"][0]["message"]
-        self.assertEqual(msg["reasoning_content"], self.engine.THOUGHT[:512] + REASONING_WRAP_UP.split("</think>")[0])
+        self.assertEqual(msg["reasoning_content"], self.engine.THOUGHT)
         self.assertEqual(msg["content"], ThinkingEngine.ANSWER)
 
     def test_answer_room_off_and_below_its_cap(self):

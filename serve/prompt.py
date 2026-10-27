@@ -49,6 +49,8 @@ class PromptText:
                 else self.tok.encode(self.body, parse_special=True)
             if self.tail:
                 ids = ids + self.tok.encode(self.tail, parse_special=True)
+            if self.n is not None and self.n != len(ids):
+                raise ValueError("engine and server tokenizer counts differ; cannot safely continue the prompt")
             self._ids = ids
             self.n = len(ids)
         return self._ids

@@ -34,9 +34,8 @@ VISION_START = "<|vision_start|>"
 REPEAT_STOP_TOKENS = 256
 # closes the thinking at reasoning_budget_tokens
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
-# the answer room (Strata 0.1.45 and #984): from this max_tokens on, thinking with no budget of its own, or with one at
-# or near max_tokens, is wrapped up early enough to leave the answer a quarter of the cap (at least ANSWER_RESERVE_MIN,
-# at most half); Service.answer_room, the server's --no-answer-room turns it off
+# Without an explicit thinking budget, reserve a quarter of the output cap for the answer (at least
+# ANSWER_RESERVE_MIN, at most half). Service.answer_room or --no-answer-room turns this off.
 ANSWER_ROOM_MIN_CAP = 1024
 ANSWER_RESERVE_MIN = 512
 # closes the thinking when the model ends its turn inside it
@@ -698,16 +697,28 @@ class Service:
     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yield ("event", Event) as text arrives, ("ping", None) as heartbeat, then ("done", {...}).
         `force`: the opening of the call the reply must make (see prepare)."""
-        budget = self.reasoning_budget(sampling) if thinking else None   # opt-in
-        if thinking and self.answer_room and max_new and max_new >= ANSWER_ROOM_MIN_CAP:
-            # max_tokens counts the thinking too: a client that caps every reply at 8192 and a task the model thinks
-            # long about got the cut-off in the middle of the thinking and no answer at all
-            room = max_new - min(max(ANSWER_RESERVE_MIN, max_new // 4), max_new // 2)
-            if budget is None or budget > room:
-                budget = room
-                if max_new <= 32768:
-                    print(f"[server] thinking limited to {room} of max_tokens {max_new} so the answer has room "
+        budget = self.reasoning_budget(sampling) if thinking else None
+        req = sampling if isinstance(sampling, dict) else {}
+        explicit_budget = (req.get("reasoning_budget_tokens") is not None
+                           or req.get("thinking_budget_tokens") is not None
+                           or (isinstance(req.get("thinking"), dict)
+                               and req["thinking"].get("budget_tokens") is not None)
+                           or self.reasoning_budget_tokens > 0)
+        budget_settled = False
+
+        def settle_budget(cap):
+            nonlocal budget, budget_settled
+            if budget_settled:
+                return
+            budget_settled = True
+            if thinking and self.answer_room and not explicit_budget and cap >= ANSWER_ROOM_MIN_CAP:
+                budget = cap - min(max(ANSWER_RESERVE_MIN, cap // 4), cap // 2)
+                if cap <= 32768:
+                    print(f"[server] thinking limited to {budget} of max_tokens {cap} so the answer has room "
                           "(--no-answer-room turns this off)", flush=True)
+
+        if not isinstance(ids, PromptText) or ids.n is not None:
+            settle_budget(ids.max_new if isinstance(ids, PromptText) and ids.max_new is not None else max_new)
         if self.sampling_defaults:     # the request's own fields win
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**self.sampling_defaults, **req_values}
@@ -766,7 +777,7 @@ class Service:
                 # timeout does not abort a healthy queued request; one that left while queued gives its place up.
                 got = False
                 try:
-                    while not got:
+                    while not got and not cancel.is_set():
                         got = self.fifo.acquire(timeout=QUEUE_BEAT_S)
                         if got:
                             turn.callback(self.fifo.release)
@@ -791,6 +802,10 @@ class Service:
                     with self.status_lock:
                         self.status["queued"] -= 1
                         self.waiting.pop(id(wait_key), None)
+                    if cancel.is_set():
+                        yield "done", {"finish": "cancel", "completion_tokens": 0, "reused": 0, "timings": None,
+                                       "reasoning_tokens": 0}
+                        return
                     # restart a dead or unloaded engine; parallel requests serialize this start on the fifo
                     with (self.fifo if par else contextlib.nullcontext()):
                         self.ensure_loaded()
@@ -823,6 +838,9 @@ class Service:
                             # a held-back tool argument can leave the stream silent for long: ping after a quiet spell
                             last_out = time.monotonic()
                             for t in gen:
+                                if isinstance(ids, PromptText) and ids.n is not None and ids.max_new is not None:
+                                    max_new = ids.max_new
+                                    settle_budget(max_new)
                                 if t is None:               # heartbeat
                                     if isinstance(ids, PromptText) and ids.n is not None and st.get("prompt_tokens") != ids.n:
                                         with self.status_lock:  # the engine has counted the prompt
@@ -901,6 +919,9 @@ class Service:
                                 self._say_died(e)
                                 if not leaving and not cancel.is_set():
                                     raise
+                        if isinstance(ids, PromptText) and ids.n is not None and ids.max_new is not None:
+                            max_new = ids.max_new
+                            settle_budget(max_new)
                         run_last = getattr(self.engine, "last", None)
                         if reused0 is None and isinstance(run_last, dict) and run_last is not engine_last0 \
                                 and run_last.get("reused") is not None:
