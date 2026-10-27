@@ -333,6 +333,7 @@ class ProcessEngine:
         self._yielded = None                            # (slot, tokens read) of a read that gave way
         self._ctl_erred = False                         # the control lines ended on an ERR
         self.wlock = threading.Lock()                   # serializes stdin writes
+        self._activity_at = time.monotonic()
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
 
@@ -362,6 +363,8 @@ class ProcessEngine:
         for line in proc.stdout:
             line = engine_line(line)
             log_unparsed(line, log)
+            if self.proc is proc and line.startswith(PROTOCOL_LINES):
+                self._activity_at = time.monotonic()
             if line.startswith("SCACHE "):
                 self._slot_report(line, reports)
                 continue
@@ -600,27 +603,43 @@ class ProcessEngine:
         on = sampling.get("experimental_speed_projection")
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
-    def _send(self, text: str):
+    def _send(self, text: str, proc=None):
         try:
             with self.wlock:
-                self.proc.stdin.write(text + "\n")
-                self.proc.stdin.flush()
+                target = self.proc if proc is None else proc
+                if self.proc is not target:
+                    raise EngineDied("the engine was replaced before the command was sent")
+                target.stdin.write(text + "\n")
+                target.stdin.flush()
         except (OSError, AttributeError):                # the pipe is gone
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
 
-    def _control(self, cancel, on_token, stop_when=None, idle=None):
+    def _control(self, cancel, on_token, stop_when=None, idle=None, prompt_len=0):
         """Read the control lines of a GEN/BGEN, yielding None as heartbeat and False per token (on_token gets the id).
         Ends at DONE (solo) or BADM; `stop_when()` true sends STOP once. `idle()` runs whenever no line came for
         0.5 s: a prompt read beside the slots' windows sends no progress line."""
         stopped = False
-        beat = time.monotonic()
+        beat = heard = time.monotonic()
+        proc, lines = getattr(self, "proc", None), self.lines
+        silence = float(self.silence_s or 0)
+        allow = silence + min(prompt_len, PP_CHUNK_MAX) / PP_FLOOR_TOK_S if silence > 0 else 0.0
+        read_to = 0
+        def stop():
+            if proc is None:
+                self._send("STOP")
+            else:
+                self._send("STOP", proc=proc)
         while True:
+            if getattr(self, "proc", None) is not proc:
+                raise EngineDied("the engine was replaced during the request")
+            if allow > 0 and time.monotonic() - max(heard, getattr(self, "_activity_at", heard)) >= allow:
+                raise self._silent("the engine stopped making progress during the request", proc=proc)
             try:
                 # polls the cancel event every 0.5 s; the HTTP heartbeat stays at 10 s
-                line = self.lines.get(timeout=0.5)
+                line = lines.get(timeout=min(0.5, allow) if allow > 0 else 0.5)
             except queue.Empty:
                 if cancel.is_set() and not stopped:
-                    self._send("STOP")
+                    stop()
                     stopped = True
                 if idle is not None:
                     idle()
@@ -628,13 +647,14 @@ class ProcessEngine:
                     beat = time.monotonic()
                     yield None
                 continue
-            beat = time.monotonic()
+            beat = heard = time.monotonic()
             if line is None:
                 raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
             if line.startswith("T "):
+                allow = silence
                 on_token(int(line[2:]))
                 if not stopped and (cancel.is_set() or (stop_when is not None and stop_when())):
-                    self._send("STOP")
+                    stop()
                     stopped = True
                 yield False                              # a token (not a heartbeat)
             elif line.startswith("PP "):
@@ -642,15 +662,19 @@ class ProcessEngine:
                 if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
                     self.progress = (int(f[1]), int(f[2]))
                     self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
+                    rate, chunk = self.prefill_tok_s_mean or 0.0, int(f[1]) - read_to
+                    read_to = int(f[1])
+                    if silence > 0 and rate > 0 and chunk > 0:
+                        allow = max(silence, PP_SLACK * chunk / rate)
                 if not stopped and cancel.is_set():
                     # stop during the prompt read, not after the first token
-                    self._send("STOP")
+                    stop()
                     stopped = True
                 yield None
             elif line.startswith("PL "):
                 self._note_live(line)
                 if not stopped and cancel.is_set():
-                    self._send("STOP")
+                    stop()
                     stopped = True
                 yield None
             elif line.startswith("DONE"):
@@ -677,15 +701,18 @@ class ProcessEngine:
         """Read control lines up to `until` (DONE or BADM) so the next request sees no leftovers; None if the engine
         ended or `born` (the starting engine generation) is gone."""
         end = time.monotonic() + timeout
+        lines = self.lines
         while time.monotonic() < end:
             if born is not None and (self.gen != born or not self.alive()):
                 return None
             try:
-                line = self.lines.get(timeout=max(0.1, min(1.0, end - time.monotonic())))
+                line = lines.get(timeout=max(0.1, min(1.0, end - time.monotonic())))
             except queue.Empty:
                 continue
             if line is None:
                 return None
+            if line.startswith(("T ", "PP ", "PL ")):
+                end = time.monotonic() + timeout
             if line.startswith("DONE"):
                 self._parse_done(line)
             if line.startswith("T ") and on_token is not None:
@@ -694,14 +721,15 @@ class ProcessEngine:
                 return line
         return None
 
-    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None, wait_s: float = 0.0):
+    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None, wait_s: float = 0.0, proc=None):
         """BSTOP a slot whose consumer left and free it at BDONE; `stream` (prompt + tokens so far) becomes what the
         slot holds. Waits up to `wait_s` for the BDONE and returns its fields (None when it has not come: the
         rest is freed in the background)."""
-        if slot >= len(self.slot_q):                    # the engine restarted with fewer slots
+        proc = proc if proc is not None else self.proc
+        if self.proc is not proc or slot >= len(self.slot_q):
             return None
         try:
-            self._send(f"BSTOP {slot}")
+            self._send(f"BSTOP {slot}", proc=proc)
         except EngineDied:
             pass
         q, busy, held = self.slot_q[slot], self.slot_busy, self.slot_held   # restart() replaces them
@@ -724,11 +752,14 @@ class ProcessEngine:
                         tail.clear()
                 if line.startswith("BDONE "):
                     f = line.split()
-                    self._note_bdone(slot, f)
+                    if self.proc is proc:
+                        self._note_bdone(slot, f)
                     return "done", f
             return "wait", None
 
         def free(confirmed):
+            if self.proc is not proc:
+                return
             report = reports[slot] if confirmed else (0, [])
             held[slot], checkpoints[slot] = self._retained_slot(tail, report, len(tail) - 1 if stream else 0)
             with self.slot_cv:
@@ -737,12 +768,24 @@ class ProcessEngine:
 
         state, fields = drain(time.monotonic() + wait_s) if wait_s > 0 else ("wait", None)
         if state != "wait":
-            free(state == "done")
+            if state == "done":
+                free(True)
             return fields
 
         def wait():
-            state, _ = drain(time.monotonic() + 600.0)
-            free(state == "done")
+            # A concurrent prompt chunk can prevent this slot from advancing.
+            allowance = 600.0 + PP_CHUNK_MAX / PP_FLOOR_TOK_S
+            while self.proc is proc:
+                end = max(time.monotonic(), getattr(self, "_activity_at", 0)) + allowance
+                state, _ = drain(end)
+                if state == "done":
+                    free(True)
+                    return
+                if state == "gone":
+                    return
+                if self.silence_s and time.monotonic() - getattr(self, "_activity_at", 0) >= allowance:
+                    self._silent("the engine did not confirm the stopped slot", proc=proc)
+                    return
         threading.Thread(target=wait, daemon=True).start()
         return None
 
@@ -887,6 +930,7 @@ class ProcessEngine:
         if not ok:
             return
         holding, born = True, self.gen                  # born: engine generation holding the control lines
+        born_proc = self.proc
         slot, gen0, reserved = None, None, None
         solo_slot, run0 = None, 0
         phase = "none"            # solo -> admit -> slot; "none" once the engine is done with it
@@ -902,6 +946,7 @@ class ProcessEngine:
                     if not ok:
                         return
                     holding, born = True, self.gen
+                    born_proc = self.proc
                 solo_slot = None
                 with self.slot_cv:
                     # With slot 0 as the solo session, a solo run on another slot's state is only possible when the
@@ -928,14 +973,14 @@ class ProcessEngine:
                         self.slot_held[solo_slot] = []          # the run overwrites what the slot held
                         self.slot_checkpoints[solo_slot] = []
                         self.slot_reports[solo_slot] = None
-                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}", proc=born_proc)
                     phase = "solo"
                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
                     self._ctl_erred = False
                     def others():       # a request waiting moves this one into a slot, if one can ever hold it
                         with self.slot_cv:
                             return self.waiting > 0
-                    for x in self._control(cancel, pending.append, stop_when=others):
+                    for x in self._control(cancel, pending.append, stop_when=others, prompt_len=len(prompt)):
                         while pending:
                             t = pending.pop(0)
                             out.append(t)
@@ -949,7 +994,7 @@ class ProcessEngine:
                                         if reserved is not None:
                                             self.slot_busy[reserved] = True
                                 if reserved is not None:    # (a solo run in a slot parks its read in that slot)
-                                    self._send(f"BYIELD {reserved}")
+                                    self._send(f"BYIELD {reserved}", proc=born_proc)
                                     yield_sent = True
                             yield None
                     phase = "none"                          # DONE was read
@@ -981,7 +1026,11 @@ class ProcessEngine:
                             ticket = self.admission.join()
                             try:
                                 while True:
-                                    slot = self.pick_slot(prompt)
+                                    if not self.alive() and not getattr(self, "starting", False):
+                                        raise EngineDied("the engine stopped while waiting for a slot")
+                                    slot = self.pick_slot(prompt) if self.gen == born else None
+                                    if self.gen != born:
+                                        raise EngineDied("the engine was replaced while waiting for a slot")
                                     if slot is not None and self.admission.may_go(ticket, self._resumes(slot, prompt)):
                                         self.slot_busy[slot] = True
                                         break
@@ -1002,7 +1051,9 @@ class ProcessEngine:
                         ok = yield from self._take_control(cancel, len(prompt))
                         if not ok:
                             return
-                        holding, born = True, self.gen
+                        holding = True
+                        if self.gen != born:
+                            raise EngineDied("the engine was replaced while holding a slot")
                     if self._yielded is not None:           # gave way: waiting requests go first
                         prefix = prompt[:self._yielded[1]]
                         self._keep_slot(slot, prefix, len(prefix))
@@ -1015,7 +1066,9 @@ class ProcessEngine:
                         ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
                         if not ok:
                             return
-                        holding, born = True, self.gen
+                        holding = True
+                        if self.gen != born:
+                            raise EngineDied("the engine was replaced while holding a yielded slot")
                     left = max(1, min(left, self.max_context - len(prompt) - SLOT_MARGIN))   # the slot's room
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
@@ -1024,7 +1077,7 @@ class ProcessEngine:
                     self.slot_checkpoints[slot] = []
                     self.slot_reports[slot] = None
                     run0 = len(out)
-                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                    self._send(f"{head} {','.join(str(int(t)) for t in prompt)}", proc=born_proc)
                     phase = "admit"
                     self._ctl_mode, self._ctl_result, self._yielded = "batch", None, None
                     self._ctl_erred = False
@@ -1034,9 +1087,9 @@ class ProcessEngine:
                         nonlocal asked
                         if (not asked and not embeddings and yields < self.YIELDS_MAX and
                                 self._shorter_waiting(len(prompt))):
-                            self._send(f"BYIELD {slot}")
+                            self._send(f"BYIELD {slot}", proc=born_proc)
                             asked = True
-                    for x in self._control(cancel, pending.append, idle=ask_yield):
+                    for x in self._control(cancel, pending.append, idle=ask_yield, prompt_len=len(prompt)):
                         while pending:
                             t = pending.pop(0)
                             out.append(t)
@@ -1063,15 +1116,26 @@ class ProcessEngine:
                 notok = bool(self._ctl_result and len(self._ctl_result) > 2 and self._ctl_result[2])
                 gen0 = len(out) if notok else len(out) - 1  # the admission's token, if any; the slot feeds it first
                 going_solo = False
+                slot_proc, slot_queue = self.proc, self.slot_q[slot]
+                slot_heard = time.monotonic()
+                # Other slots may be in a long prompt chunk before this slot can advance.
+                slot_allow = float(self.silence_s or 0)
+                if slot_allow > 0:
+                    slot_allow += PP_CHUNK_MAX / PP_FLOOR_TOK_S
                 while True:
+                    if self.proc is not slot_proc:
+                        raise EngineDied("the engine was replaced while a slot was active")
+                    if slot_allow > 0 and time.monotonic() - max(slot_heard, self._activity_at) >= slot_allow:
+                        raise self._silent("the engine stopped making progress in a slot", proc=slot_proc)
                     try:
-                        line = self.slot_q[slot].get(timeout=10.0)
+                        line = slot_queue.get(timeout=min(10.0, slot_allow) if slot_allow > 0 else 10.0)
                     except queue.Empty:
                         if cancel.is_set() and not stop_sent:
-                            self._send(f"BSTOP {slot}")
+                            self._send(f"BSTOP {slot}", proc=born_proc)
                             stop_sent = True
                         yield None
                         continue
+                    slot_heard = time.monotonic()
                     if line is None:
                         phase = "none"
                         raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
@@ -1081,13 +1145,13 @@ class ProcessEngine:
                             out.append(t)
                             if cancel.is_set():
                                 if not stop_sent:
-                                    self._send(f"BSTOP {slot}")
+                                    self._send(f"BSTOP {slot}", proc=born_proc)
                                     stop_sent = True
                                 continue
                             yield t
                         if not going_solo and not stop_sent and not cancel.is_set() and \
                                 self._may_go_solo(int(max_new) - len(out), solo_again, embeddings):
-                            self._send(f"BSTOP {slot}")         # alone now: continue solo
+                            self._send(f"BSTOP {slot}", proc=born_proc)         # alone now: continue solo
                             going_solo = True
                     elif line.startswith("BDONE "):
                         phase = "none"
@@ -1120,12 +1184,16 @@ class ProcessEngine:
                     phase = "none"                      # it ended on the engine's ERR: no DONE to wait for
                 drained = phase in ("solo", "admit")    # this run's DONE is read below
                 if phase == "solo":
-                    self._send("STOP")
-                    line = self._drain_control("DONE", born=born, on_token=pending.append)
+                    self._send("STOP", proc=born_proc)
+                    line = self._drain_control("DONE", timeout=max(300.0, float(self.silence_s or 0) + min(len(prompt), PP_CHUNK_MAX) / PP_FLOOR_TOK_S), born=born, on_token=pending.append)
+                    if line is None and self.gen == born and self.alive():
+                        self._silent("the engine did not confirm the stopped request", proc=born_proc)
                     if line and line.startswith("DONE"):
                         self._solo_kept(solo_slot, prompt, out[run0:] + pending)
                 elif phase == "admit":
-                    line = self._drain_control("BADM", born=born, on_token=pending.append)
+                    line = self._drain_control("BADM", timeout=max(300.0, float(self.silence_s or 0) + min(len(prompt), PP_CHUNK_MAX) / PP_FLOOR_TOK_S), born=born, on_token=pending.append)
+                    if line is None and self.gen == born and self.alive():
+                        self._silent("the engine did not confirm the admission", proc=born_proc)
                     if line and line.startswith("BADM ") and line.split()[2:3] in (["1"], ["2"]):
                         phase = "slot"
                         gen0 = run0
@@ -1149,7 +1217,7 @@ class ProcessEngine:
                     self.slot_held[slot] = []
                     self.slot_checkpoints[slot] = []
                     stream = list(prompt) + out[gen0:] + pending if gen0 is not None else None
-                    f = self._release_slot_when_done(slot, stream, wait_s=self.BDONE_WAIT_S)
+                    f = self._release_slot_when_done(slot, stream, wait_s=self.BDONE_WAIT_S, proc=born_proc)
                     if f is not None:
                         self._bdone_last(f)
                         self._carry_run(carry, first, last0, True)
@@ -1359,11 +1427,13 @@ class ProcessEngine:
                     if not self.can_stop:
                         heard = time.monotonic()
 
-    def _silent(self, what: str) -> EngineSilent:
+    def _silent(self, what: str, proc=None) -> EngineSilent:
         """Kill an engine that lost step with the server so the next request restarts it."""
+        proc = proc if proc is not None else self.proc
+        if self.proc is not proc:
+            return EngineSilent(f"{what}; the previous engine was replaced")
         self.silent_note = "the engine and the server lost step (engine_silence_s, 0 = wait forever)"
         self.ended = True                               # the next request restarts it
-        proc = self.proc
         try:
             proc.kill()
             proc.wait(timeout=20)                       # restart()/close() handles one still exiting
