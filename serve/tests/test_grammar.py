@@ -57,7 +57,8 @@ class Fixture:
                                      headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01"})
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(req, timeout=30)
-        return cm.exception.code, json.loads(cm.exception.read())["error"]
+        with cm.exception as error:
+            return error.code, json.loads(error.read())["error"]
 
     def chat(self, **extra):
         return self.sent("/v1/chat/completions", {"model": "qwen3.8-flash-next", "messages": [{"role": "user", "content": "hi"}], **extra})

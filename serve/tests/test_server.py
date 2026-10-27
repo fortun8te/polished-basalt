@@ -331,11 +331,18 @@ class ImageMarkers(unittest.TestCase):
             # no picture: the quoted markers are text too
             ids, _, _ = svc.prepare([{"role": "user", "content": quoted}], None, {})
             self.assertEqual([t for t in ids if t in (start, pad, end)], [])
-            # markers cut apart across three text parts are no picture's: refused, not a silent shift
+            # markers cut apart across three text parts are the same quoted text: no picture's rows go to them
             cut = [{"type": "text", "text": "<|vision_sta"}, {"type": "text", "text": "rt|><|image_pa"},
                    {"type": "text", "text": "d|>"}, *pictures]
-            with self.assertRaisesRegex(ValueError, "do not match"):
-                svc.prepare([{"role": "user", "content": cut}], None, {})
+            ids, _, _ = svc.prepare([{"role": "user", "content": cut}], None, {})
+            self.assertEqual(len([t for t in ids if t == start]), 2)
+            self.assertEqual((ids.count(pad), ids.count(end)), (7, 2))
+            literal = "".join(item["text"] for item in cut[:3])
+            self.assertTrue(holds(ids, tok.encode(literal)))
+            self.assertIn(literal + "<|vision_start|>", tok.decode(ids))
+            starts = [j for j, t in enumerate(ids) if t == start]
+            for j, rows in zip(starts, (2, 5)):
+                self.assertEqual(ids[j + 1:j + 2 + rows], [pad] * rows + [end])
             # a prompt without the marker strings has exactly the ids it had (other special tokens as well)
             old = lambda m, t=None: tok.encode(svc.template.render(m, tools=t), parse_special=True)   # noqa: E731
             for msgs, tools in (([{"role": "user", "content": "plain text, no markers"}], None),
@@ -2331,6 +2338,7 @@ class WebApp(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def get(self, path, headers=None):
         req = urllib.request.Request(self.base + path, headers=headers or {})
@@ -2338,7 +2346,8 @@ class WebApp(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.headers.get("Content-Type", ""), r.read()
         except urllib.error.HTTPError as e:
-            return e.code, e.headers.get("Content-Type", ""), e.read()
+            with e:
+                return e.code, e.headers.get("Content-Type", ""), e.read()
 
     def test_page_and_files(self):
         code, ctype, body = self.get("/")
@@ -3334,6 +3343,7 @@ class RestartWindow(unittest.TestCase):
                 self.assertEqual(r.status, 200)
         finally:
             httpd.shutdown()
+            httpd.server_close()
 
     def test_context_zero_is_503(self):
         tok = ByteTokenizer()
@@ -3477,8 +3487,9 @@ class LostStep(unittest.TestCase):
                         with urllib.request.urlopen(req, timeout=60) as r:
                             text = r.read().decode()
                     except urllib.error.HTTPError as e:
-                        self.assertEqual(e.code, 503)
-                        text = e.read().decode()
+                        with e:
+                            self.assertEqual(e.code, 503)
+                            text = e.read().decode()
                     self.assertIn("the next request restarts it", text)
                     self.assertIsNotNone(first.poll(), "the silent engine still runs")
                     self.assertEqual(svc.history[-1]["finish"], "error")

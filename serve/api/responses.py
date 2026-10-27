@@ -20,7 +20,8 @@ import json
 import time
 import uuid
 
-from serve.frontend import Event, _late_system_to_user, _parts_of, effort_kwargs, order_tool_results, stable_tool_order
+from serve.frontend import (Event, _late_system_to_user, _parts_of, check_tag_name, effort_kwargs, order_tool_results,
+                            stable_tool_order)
 
 ENCRYPTED_PREFIX = "basalt.r1:"                   # our own reasoning replay strings; others' are ignored
 HOSTED_TOOLS = ("web_search", "web_search_preview", "file_search", "computer_use_preview", "computer_use",
@@ -192,13 +193,7 @@ def input_messages(req: dict) -> list[dict]:
         order_tool_results(messages)
     except ValueError as exc:
         raise ResponsesError(str(exc), "input") from None
-    # leading system/developer messages merge into one system message; later ones become user messages
-    lead = 0
-    while lead < len(messages) and messages[lead]["role"] == "system" and isinstance(messages[lead]["content"], str):
-        lead += 1
-    if lead > 1:
-        messages[:lead] = [{"role": "system", "content": "\n\n".join(m["content"] for m in messages[:lead])}]
-    return _late_system_to_user(messages)
+    return _late_system_to_user(messages)         # leading system/developer messages merge; later ones become user
 
 
 def request_tools(req: dict):
@@ -214,6 +209,10 @@ def request_tools(req: dict):
         if not isinstance(name, str) or not name:
             raise ResponsesError("a tool needs a name", param + ".name")
         flat = f"{namespace}.{name}" if namespace else name
+        try:
+            check_tag_name(flat, "the tool name")
+        except ValueError as exc:
+            raise ResponsesError(str(exc), param + ".name") from None
         if flat in names:
             raise ResponsesError(f"duplicate tool name {flat!r}", param + ".name")
         description = tool.get("description") or ""
