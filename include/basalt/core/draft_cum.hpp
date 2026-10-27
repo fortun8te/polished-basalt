@@ -51,11 +51,15 @@ inline float draft_cum_scale() {
 inline float draft_cum_base() { return kDraftCumBase0 * draft_cum_scale(); }
 
 /// Per-request threshold.  The threshold falls from the base toward kLo as the
-/// request's drafts are accepted more often than the bin table predicts: when they run well, longer windows pay.  The
-/// observed and expected accepted counts decay per window; the ratio sets the threshold along a linear ramp.  The
-/// window's value is fixed before its drafts are made and shared by the host rule and the device graph.
+/// request's drafts are accepted more often than the bin table predicts: when they run well, longer windows pay.  They
+/// rise from the base toward kHi times the base when drafts are accepted less often than it predicts: when they run
+/// badly, the extra verified tokens cost more than they return.  The observed and expected accepted counts decay per
+/// window; the ratio sets the threshold along a piecewise-linear ramp.  A window with no draft offered carries no
+/// evidence and moves the ratio back to the one that gives the base, so a raised threshold cannot hold itself up.  The window's value is
+/// fixed before its drafts are made and shared by the host rule and the device graph.
 struct DraftCumAdapt {
     float base = draft_cum_base();   ///< the threshold while nothing is known
+    bool ramp = platform::fork_switch("THRESH_RAMP");   ///< the threshold may rise above the base; false: it only falls
     double obs = 0.0, exp = 0.0;
     float cur = base;
 
@@ -63,15 +67,26 @@ struct DraftCumAdapt {
 
     /// One verified window of the MTP chain: `n` drafts were offered with probabilities probs[0..n), `acc` accepted.
     void observe(const float* probs, int n, int acc) {
-        if (n <= 0) return;
-        constexpr double kDecay = 0.97, kRlo = 0.9, kRhi = 1.1;
+        constexpr double kDecay = 0.97, kRlo = 0.9, kRhi = 1.1, kRmin = 0.7, kIdle = 0.95;
+        constexpr float kHi = 1.3f;
         const float kLo = 0.25f * draft_cum_scale();
-        double c = 1.0, e = 0.0;
-        for (int j = 0; j < n; ++j) { c *= (double) draft_cum_acc(probs[j]); e += c; }
-        obs = obs * kDecay + (double) acc;
-        exp = exp * kDecay + e;
+        if (n <= 0) {
+            if (!ramp || exp < 0.5) return;
+            obs = obs * kIdle + kRlo * exp * (1.0 - kIdle);   // the ratio drifts to the one that gives the base
+        } else {
+            double c = 1.0, e = 0.0;
+            for (int j = 0; j < n; ++j) { c *= (double) draft_cum_acc(probs[j]); e += c; }
+            obs = obs * kDecay + (double) acc;
+            exp = exp * kDecay + e;
+        }
         if (exp < 0.5) return;
-        const double t = std::fmin(std::fmax((obs / exp - kRlo) / (kRhi - kRlo), 0.0), 1.0);
+        const double r = obs / exp;
+        if (ramp && r < kRlo) {
+            const double u = std::fmin(std::fmax((kRlo - r) / (kRlo - kRmin), 0.0), 1.0);
+            cur = base + (float) u * (kHi * base - base);
+            return;
+        }
+        const double t = std::fmin(std::fmax((r - kRlo) / (kRhi - kRlo), 0.0), 1.0);
         cur = base + (float) t * (std::fmin(kLo, base) - base);
     }
 };
