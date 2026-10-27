@@ -23,6 +23,10 @@ std::string host_os_name();
 /// the platform puts on PATH.
 std::string python_interpreter(const std::string& src_dir);
 
+/// Whether the change switched by the environment variable BASALT_FORK_<name> is on: it is, unless the variable is
+/// set to "0". Read on each call, so a caller that asks in a hot path keeps the answer.
+bool fork_switch(const char* name);
+
 /// Asks that this process be the one ended first if the machine runs out of memory. No effect where the OS has no
 /// such knob.
 void prefer_oom_victim();

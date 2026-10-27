@@ -41,6 +41,21 @@ std::string shell_quote(const std::string& a) {
 }
 }  // namespace
 
+bool fork_switch(const char* name) {
+    const std::string var = std::string("BASALT_FORK_") + name;
+#if defined(_WIN32)
+    char* value = nullptr;
+    size_t len = 0;
+    const bool set = _dupenv_s(&value, &len, var.c_str()) == 0 && value != nullptr;
+    const bool off = set && std::strcmp(value, "0") == 0;
+    std::free(value);
+#else
+    const char* value = std::getenv(var.c_str());
+    const bool off = value != nullptr && std::strcmp(value, "0") == 0;
+#endif
+    return !off;
+}
+
 std::optional<std::string> capture_output(const std::vector<std::string>& argv, bool include_stderr) {
     if (argv.empty()) return std::nullopt;
     std::string cmd;

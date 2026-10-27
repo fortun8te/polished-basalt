@@ -60,6 +60,13 @@ int main() {
 
     const std::string os = host_os_name();
     check(gpu_memory_pages() == (os == "Windows" || os == "WSL2"), "gpu_memory_pages: only the Windows driver pages");
+
+    // set_env keeps a value that is already there, so each name is set once
+    set_env("BASALT_FORK_SYSTEM_TEST_OFF", "0");
+    set_env("BASALT_FORK_SYSTEM_TEST_ON", "1");
+    check(!fork_switch("SYSTEM_TEST_OFF"), "fork_switch is off when the variable is 0");
+    check(fork_switch("SYSTEM_TEST_ON"), "and on when it is 1");
+    check(fork_switch("SYSTEM_TEST_UNSET"), "and on when it is not set");
     const DynLib nvml = DynLib::open_nvml();
     if (nvml) {
         check(nvml.sym<void*>("nvmlInit_v2") != nullptr, "the management library, when present, exports nvmlInit_v2");
