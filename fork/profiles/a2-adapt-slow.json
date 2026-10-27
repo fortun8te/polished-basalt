@@ -2,7 +2,7 @@
   "server": {
     "model": "C:/Users/pc-agent/AgentWorkspace/local-ai-20261026/models/basalt-compact/flashnext-iq3s-external-ple.basalt",
     "host": "127.0.0.1",
-    "port": 18892,
+    "port": 18894,
     "alias": "qwen3.8-flash-next-iq3_s",
     "vision": "off"
   },
