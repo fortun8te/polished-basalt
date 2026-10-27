@@ -308,7 +308,7 @@ int Verifier::serve_poll(PoolMultiFn pool, void* user, std::string& err) {
             w.res1 = dm_->pdev >= 0 ? dm_->shadow1.data() + (size_t) (l + 1) * g.n_expert : nullptr;
             w.arrive.store(0, std::memory_order_relaxed);
             w.ready.store(0, std::memory_order_relaxed);
-            w.blob = nullptr;
+            for (const uint8_t*& bp : w.blob) bp = nullptr;
             warm_pool_->idle_start(&warm_job, &w);
         }
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();

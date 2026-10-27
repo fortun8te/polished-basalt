@@ -14,8 +14,8 @@ namespace basalt::core {
 // The CPU tier's cache warm-up.  After layer l's doorbell the parked pool workers score layer l + 1's router on layer
 // l's FFN input (the ring's q8_1 rows; the router in 4-bit with one scale per 32 values, a prediction only: half the
 // bytes of an 8-bit copy, so the scoring leaves more of the gap to the read), take every token's top k, rank the
-// predicted experts only the CPU holds by their summed weight, and read the likeliest one into their caches.  The next
-// batch stops the work; the experts are computed as before.
+// predicted experts only the CPU holds by their summed weight, and read the kPicks likeliest into their caches, the
+// likeliest first.  The next batch stops the work; the experts are computed as before.
 struct CpuWarm {
     std::vector<uint8_t> rq;  ///< [n_layers][n_expert][n_embd / 2]: per 32 values, value i in the low nibble of byte i
                               ///< and value i + 16 in its high nibble, each the code plus 8
@@ -30,7 +30,8 @@ struct CpuWarm {
     std::vector<float> logits;                        ///< [kVerifyMaxT][n_expert]
     alignas(64) std::atomic<int> arrive{0};
     alignas(64) std::atomic<int> ready{0};
-    const uint8_t* blob = nullptr;                    ///< the expert to read, or null
+    static constexpr int kPicks = 3;
+    const uint8_t* blob[kPicks] = {};                 ///< the experts to read, likeliest first; null past the last
     std::atomic<uint64_t> sink{0};
 };
 
