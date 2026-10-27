@@ -201,12 +201,16 @@ class Refusals(LauncherCase):
         self.lines.clear()
         self.refused(disable=["pdep"])
 
-    def test_a_listener_on_the_production_port_or_any_arm_port(self):
-        for port in (fl.PRODUCTION_PORT, 18892, 18893):
+    def test_a_listener_on_the_production_port_or_on_the_arms_own_port(self):
+        for port in (fl.PRODUCTION_PORT, 18892):
             self.m.listening = {port}
             self.lines.clear()
             self.refused("a0")
             self.assertIn(str(port), self.said())
+
+    def test_a_listener_on_another_arms_port_does_not_block_this_arm(self):
+        self.m.listening = {18893}
+        self.assertEqual(self.start("a0"), 0, self.said())
 
     def test_too_little_or_unknown_free_gpu_memory(self):
         self.m.free = 4000

@@ -8,7 +8,7 @@
 
 `start` refuses, and starts nothing, unless: fork_identity.py verify passes for the arm (the engine and every file in
 bin/, the source commit and tree, the profile and the model files by sha256); nothing listens on the production port
-or on any arm's port; and enough GPU memory is free. The server then runs from a resolved copy of the profile in its
+or on the arm's own port; no fork server is already running; and enough GPU memory is free. The server then runs from a resolved copy of the profile in its
 own run directory (logs, receipt, and every file the engine would write), on the arm's own port, with a child
 environment that holds exactly the BASALT_FORK_* switches named here and no inherited ones.
 Only the standard library; Python 3.9 or newer.
@@ -309,8 +309,7 @@ def start(root, arm: str, *, disable=(), enable=(), numbers=(), wait_s: float = 
         if running(rec, hooks):
             raise LaunchError(f"a fork server is already running (pid {rec['pid']}, arm {rec['arm']}, port "
                               f"{rec['port']}); stop it first")
-        busy = [p for p in {production_port, *(p for p in arm_ports(root).values() if isinstance(p, int))}
-                if hooks.port_listening(p)]
+        busy = [p for p in {production_port, port} if hooks.port_listening(p)]
         if busy:
             raise LaunchError(f"something already listens on port(s) {', '.join(map(str, sorted(busy)))}; "
                               "nothing was stopped or started")

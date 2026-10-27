@@ -458,6 +458,14 @@ const Hc8Copy* hc8_find(const std::string& name, int rows, int cols) {
     return &it->second;
 }
 
+static bool hc8_bytes(uint32_t rows, uint32_t cols, uint32_t srow, uint64_t& out) {
+    const uint64_t row = (uint64_t) cols + (uint64_t) srow * 2;
+    if (rows && row > (std::numeric_limits<uint64_t>::max)() / rows) return false;
+    out = row * rows;
+    return true;
+}
+
+
 bool hc8_read(const FileRange& r, std::map<std::string, Hc8Copy>& out, std::string& err) {
     out.clear();
     Hc8Header h{};
