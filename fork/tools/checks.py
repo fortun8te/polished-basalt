@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -22,7 +23,13 @@ def main(argv=None):
     parser.add_argument("mode", choices=("quick", "full"), nargs="?", default="quick")
     args = parser.parse_args(argv)
     targets = (QUICK if args.mode == "quick" else ["serve/tests", "fork/scheduler/tests"]) + SHARED
-    return subprocess.call([sys.executable, "-m", "pytest", "-q", "-W", "error", *targets], cwd=ROOT)
+    # -n auto spreads the tests over local cores (pytest-xdist, from requirements-test.txt); without it, run serially.
+    workers = ["-n", "auto"] if _has_xdist() else []
+    return subprocess.call([sys.executable, "-m", "pytest", "-q", "-W", "error", *workers, *targets], cwd=ROOT)
+
+
+def _has_xdist():
+    return importlib.util.find_spec("xdist") is not None
 
 
 if __name__ == "__main__":
