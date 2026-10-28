@@ -345,7 +345,7 @@ class EveryOption(unittest.TestCase):
         ap = build_parser()
         for name, act in server_options(ap).items():
             # grammar and answer-room are on by default: their no- forms differ (test_grammar, test_answer_room_switch)
-            if name in ("api-key", "engine-bin", "grammar", "answer-room"):
+            if name in ("api-key", "api-key-file", "engine-bin", "grammar", "answer-room"):
                 continue
             v = "localhost" if name == "host" else self.sample(act)
             if isinstance(act, argparse._AppendAction):
@@ -397,7 +397,7 @@ class EveryOption(unittest.TestCase):
 class ApiKey(unittest.TestCase):
     def test_the_config_cannot_hold_a_key(self):
         for obj in ({"server": {"api-key": "k"}}, {"server": {"--api_key": "k"}}, {"server": {"API-KEY": "k"}},
-                    {"engine": {"api-key": "k"}}):
+                    {"engine": {"api-key": "k"}}, {"server": {"api-key-file": "k.txt"}}):
             with self.assertRaisesRegex(ValueError, "api-key can't be set in a config file"):
                 load_config_file(conf(obj), build_parser())
 

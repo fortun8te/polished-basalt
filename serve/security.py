@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import socket
+from pathlib import Path
 
 
 LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
@@ -11,6 +12,18 @@ LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
 def exposed_without_key(host: str, api_key: str) -> bool:
     """True when the server listens beyond this PC without an API key."""
     return host not in LOOPBACK_NAMES and not api_key
+
+
+def api_key_from_file(path) -> str:
+    """The key stored in a file: its first line, trimmed. An unreadable or empty file raises ValueError (never "no key")."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        raise ValueError(f"cannot read the API key file {path}: {e.strerror or e}") from None
+    key = lines[0].strip() if lines else ""
+    if not key:
+        raise ValueError(f"the API key file {path} is empty")
+    return key
 
 
 def api_key_of(value) -> str:

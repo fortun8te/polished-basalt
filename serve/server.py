@@ -34,7 +34,7 @@ from serve.engine.vision import (EngineVision, ImageSources, Vision, check_gpu, 
                                  gpu_plan, gpu_text, gpus_in_play, vision_card, vision_env, vision_line)
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.handler import Server, serve  # noqa: E402
-from serve.security import (LOOPBACK_NAMES, allowed_hosts_of, api_key_of, exposed_without_key,  # noqa: E402
+from serve.security import (LOOPBACK_NAMES, allowed_hosts_of, api_key_from_file, api_key_of, exposed_without_key,  # noqa: E402
                             lan_addresses, origins_of)
 from serve.service import Service  # noqa: E402
 from serve.util.logbuf import ColorStream, LogBuffer, TeeStream, tail_file  # noqa: E402
@@ -233,6 +233,15 @@ def main() -> int:
         # an empty key would silently disable authentication
         err("[server] error: --api-key is empty (give a key, or leave it out)")
         return 2
+    if a.api_key_file:
+        if a.api_key:
+            err("[server] error: give either --api-key or --api-key-file, not both")
+            return 2
+        try:
+            a.api_key = api_key_from_file(a.api_key_file)
+        except ValueError as e:
+            err(f"[server] error: {e}")
+            return 2
     try:
         svc.api_key = api_key_of(a.api_key)
     except ValueError as e:
