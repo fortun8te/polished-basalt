@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.engine.mock import MockEngine  # noqa: E402
 from serve.handler import serve  # noqa: E402
-from serve.security import (allowed_hosts_of, api_key_of, host_allowed, host_name, host_names_for,  # noqa: E402
+from serve.security import (allowed_hosts_of, api_key_from_file, api_key_of, host_allowed, host_name, host_names_for,  # noqa: E402
                             key_matches, origin_allowed)
 from serve.service import Service  # noqa: E402
 from serve.util.text import ByteTokenizer  # noqa: E402
@@ -325,3 +325,22 @@ class ApiKeyForms(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiKeyFileTests(unittest.TestCase):
+    def test_reads_first_line_trimmed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "key.txt"
+            p.write_text("  s3cret  \nignored\n", encoding="utf-8")
+            self.assertEqual(api_key_from_file(p), "s3cret")
+
+    def test_empty_or_missing_file_is_an_error_not_no_key(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            empty = Path(d) / "empty.txt"
+            empty.write_text("\n  \n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                api_key_from_file(empty)
+            with self.assertRaises(ValueError):
+                api_key_from_file(Path(d) / "missing.txt")
