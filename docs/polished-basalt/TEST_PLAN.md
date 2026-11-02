@@ -17,8 +17,8 @@ Do not run during another GPU job or bypass an approval rejection through anothe
 1. Copy the repo working tree (without `.git`) to `C:\Users\pc-agent\AgentWorkspace\basalt-5080\src`.
 2. Run `fork\windows\Build-Fork.cmd`. CMake build files are under `...\basalt-5080\build`; runtime executables are under the
    source tree's `bin` directory. The build records candidate identity. Neither path replaces `ai200-20261026`.
-3. `ctest --test-dir ...\build -R "iq_signs_test|iq_avx512_signs_test|platform_system_test|file_expert_source_test|external_ple_test|verified_file_test|pool_native_test|model_file_test"` must be 100 % green.
-   `iq_avx512_signs_test` has never run on real AVX-512 hardware before this step.
+3. `ctest --test-dir ...\build -R "iq_avx512_test|platform_system_test|file_expert_source_test|external_ple_test|verified_file_test|pool_native_test|model_file_test"` must be 100 % green.
+   `iq_avx512_test` covers upstream #111 (pdep sign masks, which replaced the fork's #86 port).
 
 ## 2. Start-up checks (read the log, no measurements yet)
 

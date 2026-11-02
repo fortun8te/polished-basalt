@@ -106,5 +106,5 @@ class LocalReadiness(unittest.TestCase):
             self.assertNotIn('--conversation-cache-mib',engine_flags_of(str(fake)))
             fake.write_text(' --conversation-cache-mib N ')
             self.assertIn('--conversation-cache-mib',engine_flags_of(str(fake)))
-        text=(root/'src/program/generate.cpp').read_text()
-        self.assertIn('a == "--conversation-cache-mib"',text)
+        text=(root/'src/program/cli/arguments.cpp').read_text()
+        self.assertIn('a == "--conversation-cache-mib"',text)  # parser moved to src/program/cli in 0.2

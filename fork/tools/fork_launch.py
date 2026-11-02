@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start, stop and inspect one fork server arm, only when the files on disk are the recorded candidate.
 
-  fork_launch.py start --arm a1-ple-ram [--disable STAGING,PDEP_SIGNS] [--enable GDN_REC2] [--set DRAFT_CUM_MULT=1.2]
+  fork_launch.py start --arm a1-ple-ram [--disable STAGING,SPLIT_COST] [--enable GDN_REC2] [--set DRAFT_CUM_MULT=1.2]
   fork_launch.py stop
   fork_launch.py status
   fork_launch.py promote-plan --arm a1-ple-ram --daily DAILY.json     # what an arm changes, endpoint left alone
@@ -45,9 +45,9 @@ INPUT_ENGINE_FLAGS = ("ple-gguf",)
 # compares this table with the sources.
 KILL, OPT_IN, NUMBER = "kill", "opt-in", "number"
 SWITCHES = {
-    "PIN_HEADROOM": (KILL,), "STAGING": (KILL,), "PDEP_SIGNS": (KILL,), "ECOQOS": (KILL,),
+    "PIN_HEADROOM": (KILL,), "STAGING": (KILL,),
     "SPLIT_COST": (KILL,), "THRESH_RAMP": (KILL,),
-    "GDN_REC2": (OPT_IN,), "LOOKUP_OVERRIDE": (OPT_IN,), "MISS_THRESH": (OPT_IN,), "COUPLED_DRAFT": (OPT_IN,),
+    "GDN_REC2": (OPT_IN,), "COUPLED_DRAFT": (OPT_IN,),
     "DRAFT_CUM_MULT": (NUMBER, 0.25, 4.0), "COUPLED_MIN_TEMP": (NUMBER, 0.0, 4.0),
 }
 

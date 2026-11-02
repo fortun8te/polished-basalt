@@ -107,9 +107,9 @@ class Start(LauncherCase):
         self.assertEqual(receipt["env_fork"], {})
 
     def test_named_switches_are_the_only_ones_set_and_are_recorded(self):
-        self.assertEqual(self.start("a0", disable=["staging", "BASALT_FORK_PDEP_SIGNS"], enable=["GDN_REC2"],
+        self.assertEqual(self.start("a0", disable=["staging", "BASALT_FORK_SPLIT_COST"], enable=["GDN_REC2"],
                                     numbers=["DRAFT_CUM_MULT=1.2"]), 0, self.said())
-        want = {"BASALT_FORK_STAGING": "0", "BASALT_FORK_PDEP_SIGNS": "0", "BASALT_FORK_GDN_REC2": "1",
+        want = {"BASALT_FORK_STAGING": "0", "BASALT_FORK_SPLIT_COST": "0", "BASALT_FORK_GDN_REC2": "1",
                 "BASALT_FORK_DRAFT_CUM_MULT": "1.2"}
         env = self.m.spawned[0]["env"]
         self.assertEqual({k: v for k, v in env.items() if k.startswith("BASALT_FORK_")}, want)
@@ -134,7 +134,7 @@ class Start(LauncherCase):
 
 class Switches(unittest.TestCase):
     def test_the_documented_example_name_pdep_is_rejected_with_the_real_names(self):
-        with self.assertRaisesRegex(fl.LaunchError, "unknown switch 'pdep'.*PDEP_SIGNS"):
+        with self.assertRaisesRegex(fl.LaunchError, "unknown switch 'pdep'.*SPLIT_COST"):
             fl.switch_values(disable=["pdep"])
 
     def test_a_switch_must_be_used_the_way_its_kind_reads(self):

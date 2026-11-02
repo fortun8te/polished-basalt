@@ -5,7 +5,7 @@
  the arm's profile and the model files match fork-identity.json; nothing listens on 18891 or on this arm's port; and
  14 GiB of GPU memory are free. Logs, the receipt and every file the engine writes go to fork-runs\<arm>\<time>\.
  Switches (BASALT_FORK_<NAME>; the caller's own BASALT_FORK_* are never inherited):
-   -Disable STAGING,PDEP_SIGNS   set to 0 (on by default; names in docs/fork.md and docs/polished-basalt/PATCHES.md)
+   -Disable STAGING,SPLIT_COST   set to 0 (on by default; names in docs/fork.md and docs/polished-basalt/PATCHES.md)
    -Enable GDN_REC2              set to 1 (off by default)
    -Number DRAFT_CUM_MULT=1.2    a number switch
  Model files are checked by sha256. -WaitSeconds N waits for a loaded Basalt /health response.
