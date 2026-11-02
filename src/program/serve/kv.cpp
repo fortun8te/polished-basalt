@@ -1,6 +1,8 @@
 // src/program/serve/kv.cpp - kv operations.
 #include "state.hpp"
 
+#include "basalt/program/auto_plan.hpp"
+
 namespace basalt::program::serve {
 
 // the expert cache never shrinks below the slots the prompt path's smallest loan needs (a 256-token chunk, and
@@ -206,6 +208,17 @@ bool Runtime::kv_fit(basalt::core::SessionState& s, int64_t cells, std::string& 
         const int64_t gran = (int64_t) std::max<uint64_t>(basalt::core::vmm::granularity(), 1);
         const int64_t keep = std::max<int64_t>(0, (xcache.mapped_bytes() - (add - room)) / gran * gran);
         if (kv_keep_routed && !move_routed_below(xcache.slots_after_shrink(keep), "elastic KV", e)) return false;
+        // when an expert the cut gives up has no RAM copy, the experts past the cut take their RAM homes first (with
+        // the loan's), so the CPU tier reads them from RAM, not from the file; when every one has a copy this is a
+        // single pass over the residency table and nothing else
+        if (src.complement_ready() &&
+            basalt::program::cut_gives_up_bare(host_res, xcache.slots_after_shrink(keep), g.n_expert,
+                                               [&](int64_t l, int64_t x) { return src.has_resident(l, x); })) {
+            std::string he;
+            if (!home_given_up(xcache.slots_after_shrink(keep), he))
+                basalt::log::warn("basalt serve", "elastic KV: no RAM homes for the experts the tail gives up "
+                                     "without a copy (%s): they are read from the file", he.c_str());
+        }
         if (!xcache.shrink(keep, e)) return false;
         const int64_t live = xcache.slots();
         for (size_t i = 0; i < host_res.size(); ++i)
