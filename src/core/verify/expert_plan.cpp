@@ -21,7 +21,7 @@ using namespace verify_detail;
 // A host-to-device upload in pieces of at most kSmallCopy bytes: a copy that small passes the expert copies queued on
 // the card's copy engine (an adaptive round's), a larger one waits behind all of them.
 constexpr size_t kSmallCopy = 16384;
-static cudaError_t copy_small(void* dst, const void* src, size_t bytes, cudaStream_t s) {
+cudaError_t copy_small(void* dst, const void* src, size_t bytes, cudaStream_t s) {
     for (size_t o = 0; o < bytes; o += kSmallCopy) {
         const cudaError_t e = cudaMemcpyAsync((uint8_t*) dst + o, (const uint8_t*) src + o, std::min(kSmallCopy, bytes - o),
                                               cudaMemcpyHostToDevice, s);

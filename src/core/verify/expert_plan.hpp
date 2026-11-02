@@ -103,4 +103,7 @@ struct DecMoe {
     std::vector<uint32_t> put_i;             ///< dm_sync: the peer entries that changed
 };
 
+/// A host-to-device upload in pieces small enough to pass queued expert copies (expert_plan.cpp; batch_execution uses it too).
+cudaError_t copy_small(void* dst, const void* src, size_t bytes, cudaStream_t s);
+
 }  // namespace basalt::core
