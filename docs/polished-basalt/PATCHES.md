@@ -1,5 +1,8 @@
 # Polished Basalt: every change on top of upstream, with provenance
 
+> On `polished-basalt-0.2-merge` the base is upstream 0.2.0 and several rows below are dropped or not yet ported;
+> [REBASE_0.2.md](REBASE_0.2.md) is authoritative for that branch. Commit hashes below are the original `polished-basalt` ones.
+
 Base: upstream [jesdga95/basalt](https://github.com/jesdga95/basalt) `main` at `b6125f60` (27 Oct 2026, includes the Windows
 RAM-guard fix `d148f19b`). Everything below sits on top of it as separate commits, so any one can be dropped with `git revert`.
 

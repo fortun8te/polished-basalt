@@ -17,6 +17,12 @@ same full IQ3_S model, high reasoning, actual prompt lengths, output allowances 
 These observations cannot form one progress curve. The 115.1 result is not the high-reasoning baseline. No recorded result
 establishes 140+ output tokens/s with high reasoning, a filled 256K context and checked coding quality.
 
+## Upstream 0.2.0
+
+Upstream reports about +13% decode (RTX 5090 + 5060 Ti, NVFP4, greedy-identical). The only RTX 5080 community row
+(0.1.x, WSL, IQ3_S) shows 137.9 tok/s decode. Expectation for this machine: roughly 125-130 tok/s on the short coding
+reference, unmeasured. Details: [REBASE_0.2.md](REBASE_0.2.md).
+
 ## Candidate benefits
 
 | Candidate | Evidence | What remains to prove |

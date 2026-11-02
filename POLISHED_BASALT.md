@@ -20,9 +20,12 @@ from [Strata](https://github.com/Niko1221/Strata)), tuned for one machine:
 
 Upstream `main` plus a curated set of fixes that are still open upstream, a few new ones, and the tooling to run them safely:
 
-- **Engine:** PCIe staging for single requests and mixed packs (basalt #82), AVX-512 sign masks (#86), Windows power-throttling
-  opt-out (#93), two-heads-per-block GDN (#85, opt-in), pinned-memory headroom, draft-threshold knob.
-- **Server:** retry-aware checkpoint routing (#89), conversation-cache minimum (#67), answer room so thinking cannot eat the answer (#95).
+- **Base:** upstream 0.2.0 (`.basalt` v2, two-stage Q8_0 head, cheaper MTP draft screen, Q2_0 load fix). The fork's AVX-512
+  sign masks (#86), power-throttling opt-out (#93), conversation-cache minimum (#67) and answer room (#95) are now upstream's
+  own versions. See [`docs/polished-basalt/REBASE_0.2.md`](docs/polished-basalt/REBASE_0.2.md).
+- **Engine:** PCIe staging for single requests and mixed packs (basalt #82), Windows slice pinning, two-heads-per-block GDN
+  (#85, opt-in), pinned-memory headroom, draft-threshold knobs.
+- **Server:** HTTP/vision/tool hardening, API key file. Retry-aware checkpoint routing (#89) is **not yet ported** to 0.2.
 - **Local additions from the Codex build:** external PLE table (no second 87 GB pack), `/chat` page.
 - **Around the engine:** a request scheduler proxy (`fork/scheduler/`), Windows build/start/stop scripts (`fork/windows/`),
   four A/B profile arms (`fork/profiles/`).
@@ -34,6 +37,8 @@ Every change is its own commit with provenance, a kill switch where it can drift
 
 - **Nothing has run on the 5080 PC.** Code was assembled, rebased, unit-tested where possible on a Mac (serve tests, scheduler tests,
   the pdep bit-identity proof) and read-checked. CUDA and Windows-specific code has not been compiled here.
+- **0.2 expectation (not measured):** upstream reports about +13% decode on a 5090 + 5060 Ti (NVFP4); applied to the 115 tok/s
+  reference that is roughly 125-130 tok/s. Sources and limits in `REBASE_0.2.md`.
 - **No combined speedup is measured.** The old 115 tok/s reference used thinking off and cannot support a high-reasoning
   forecast. See [`EXPECTED_GAINS.md`](docs/polished-basalt/EXPECTED_GAINS.md) for separate workloads, evidence and limits.
 - Anything unproven is either opt-in (`BASALT_FORK_GDN_REC2=1`) or has a kill switch.
@@ -43,6 +48,7 @@ Every change is its own commit with provenance, a kill switch where it can drift
 | Path | What |
 |---|---|
 | `docs/polished-basalt/PATCHES.md` | every change, source, risk, kill switch |
+| `docs/polished-basalt/REBASE_0.2.md` | what the 0.2.0 rebase dropped, ported and left to do; speed and Q2_0 notes |
 | `docs/polished-basalt/EXPECTED_GAINS.md` | measured evidence, candidate benefits and limits |
 | `docs/polished-basalt/TEST_PLAN.md` | the ordered checklist to run on the PC |
 | `docs/polished-basalt/WSL_VS_WINDOWS.md` | why the Linux-in-Windows test was slower |
@@ -54,7 +60,8 @@ Every change is its own commit with provenance, a kill switch where it can drift
 
 ## Branches
 
-- `polished-basalt`: the fork (default).
+- `polished-basalt`: the fork on 0.1.x (default).
+- `polished-basalt-0.2-merge`: the fork rebased onto upstream 0.2.0 (see `REBASE_0.2.md`).
 - `opt/pr28-windows-memory-seams`: optional, upstream PR #28 applied on top (large pages and DXGI-budget cache sizing).
 - `main`: untouched upstream mirror. `rtx5080-win-b2fe`: the earlier base, kept for reference.
 
