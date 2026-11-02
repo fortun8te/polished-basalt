@@ -85,7 +85,6 @@ def make_handler(svc: Service):
 
         watch_done = None                                   # stops this request's disconnect watcher
 
-<<<<<<< HEAD
         def _deadline(self, seconds):
             with self._deadline_lock:
                 if self._deadline_timer is not None:
@@ -120,7 +119,6 @@ def make_handler(svc: Service):
                 super().handle_one_request()
             finally:
                 self._deadline(None)
-=======
         # a request's session identity, the headers a load balancer names its flows by (tinyllb's order), then the
         # request body's own field; the slot the engine runs a conversation in follows it
         SESSION_HEADERS = ("x-llm-flow-id", "x-claude-code-session-id", "x-session-id", "x-session-affinity",

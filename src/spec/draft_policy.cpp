@@ -17,7 +17,7 @@ constexpr double kTokAlpha = 0.05;    // EMA weight of a new MTP window outcome
 constexpr double kDecay = 0.97;       // lookup counts: older windows fade
 // Before a bucket has data: the longer the match, the likelier its continuation (llama.cpp's lookup decoding gates
 // on the same thing); worth 4 observations, so a few real windows override it
-constexpr double kPriorQ[DraftPolicy::kBuckets] = {0.75, 0.88, 0.93, 0.96};
+constexpr double kPriorQ[DraftPolicy::kBuckets] = {0.80, 0.90, 0.94, 0.97};   // code-tuned start; EMA takes over
 constexpr double kPriorN = 4.0;
 // A lookup that disagrees with the MTP's first draft: taken only where lookups agreeing with it were accepted this
 // often, and priced by its own count, which starts at this rate (worth kPriorN observations)

@@ -806,6 +806,9 @@ class Service:
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
     def _note(self, n, evs, st=None, rate=None):
+        (self.rate if rate is None else rate).append((time.time(), n))   # live rate window, lock-free
+        if n % 4 and not evs:
+            return
         with self.status_lock:
             s = self.status if st is None else st
             s["generated"] = n
@@ -814,7 +817,6 @@ class Service:
                 s["windows"], s["window_tokens"] = windows()
             if s.get("first_token") is None:
                 s["first_token"] = time.time()
-            (self.rate if rate is None else rate).append((time.time(), n))   # live rate window
             for ev in evs:
                 if ev.kind == "reasoning":
                     s["phase"] = "thinking"
