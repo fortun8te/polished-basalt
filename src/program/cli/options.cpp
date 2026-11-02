@@ -142,7 +142,7 @@ std::optional<int> validate_generation_options(const Options& o, bool multi_gpu,
     }
     if (!std::isfinite(o.temperature) || o.temperature < 0 || !std::isfinite(o.top_p) ||
         o.top_p <= 0 || o.top_p > 1 || o.top_k < 0 || o.expert_cache < -1 ||
-        o.pool_workers < 0 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
+        o.pool_workers < 0 || o.load_threads < 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                            [](int slots) { return slots < 0; }) ||
         (o.expert_cache_remote[1] > 0 && o.expert_cache_remote[0] == 0) ||
         (o.expert_cache_remote[2] > 0 && o.expert_cache_remote[1] == 0)) {
