@@ -4,6 +4,7 @@
 #include "diagnostics.hpp"
 #include "basalt/core/load_progress.hpp"
 #include "basalt/core/verify.hpp"
+#include "basalt/kernels/cpu/expert_layout.hpp"
 #include "basalt/core/remote_expert_opt.hpp"
 #include "basalt/core/on_device.hpp"
 #include "basalt/platform/compiler.hpp"
