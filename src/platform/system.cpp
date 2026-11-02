@@ -140,6 +140,14 @@ bool keep_full_speed() {
     return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s, sizeof s) != 0;
 }
 
+void keep_thread_full_speed() {
+    THREAD_POWER_THROTTLING_STATE s{};
+    s.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    s.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    s.StateMask = 0;
+    (void) SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &s, sizeof s);
+}
+
 bool gpu_memory_pages() { return true; }
 
 bool stderr_is_terminal() {
@@ -193,6 +201,7 @@ void prefer_oom_victim() {
 }
 
 bool keep_full_speed() { return true; }   // the scheduler does not slow a process for its window's state
+void keep_thread_full_speed() {}
 
 // WSL2 reaches the GPU through the Windows driver, which pages
 bool gpu_memory_pages() { return host_os_name() == "WSL2"; }

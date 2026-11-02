@@ -43,6 +43,10 @@ void prefer_oom_victim();
 /// such knob.
 bool keep_full_speed();
 
+/// The same request for the calling thread alone, for threads started later (the CPU expert pool's workers). Best
+/// effort, nothing to report.
+void keep_thread_full_speed();
+
 /// Whether the GPU driver pages device memory out to system memory when a card is full, so that an allocation past
 /// the end succeeds and the work using it stalls, instead of failing the allocation.
 bool gpu_memory_pages();

@@ -1,4 +1,5 @@
 // src/kernels/cpu/pool.cpp - the CPU expert pool.  Read pool.hpp first; it explains the protocol.
+#include "basalt/platform/system.hpp"
 #include "basalt/kernels/cpu/pool.hpp"
 #include "basalt/core/progress.hpp"
 #include "basalt/kernels/cpu/expert_layout.hpp"
@@ -124,6 +125,7 @@ void ExpertPool::publish() {
 }
 
 void ExpertPool::worker(int id) {
+    platform::keep_thread_full_speed();   // Windows may otherwise demote a spinning worker (basalt #93)
     uint32_t seen = 0;
     // ARRIVE at the park before the first wait, so `parked_ == n_` is true from construction: a
     // `set_active_workers` before the first batch waits for `parked_ == n_` and would otherwise never return.
