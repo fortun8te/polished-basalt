@@ -104,29 +104,4 @@ class ControlAdmission(unittest.TestCase):
         self.clean(e)
 
 
-class CancelledDispatch(unittest.TestCase):
-    from serve.tests.test_pump_framing import FakeChild as _FakeChild
-    setUp = _FakeChild.setUp
-    engine = _FakeChild.engine
-
-    def test_cancelled_batch_request_sends_no_generation_command(self):
-        e = self.engine("fragments")
-        e.batch = 2
-        cancel = threading.Event()
-        cancel.set()
-        with mock.patch.object(e, "_send", wraps=e._send) as send:
-            self.assertEqual(list(e.generate([1], 8, {}, cancel)), [])
-        send.assert_not_called()
-        self.assertTrue(e.alive())
-        self.assertFalse(e.ctl.locked())
-        self.assertEqual((e.waiting, e.wait_lens), (0, []))
-
-    def test_stale_batch_entry_after_restart_sends_no_command(self):
-        e = self.engine("fragments")
-        self.assertEqual(e.batch, 0)
-        with mock.patch.object(e, "_send", wraps=e._send) as send:
-            with self.assertRaises(EngineDied):
-                list(e.generate_batched([1], 8, {}, threading.Event()))
-        send.assert_not_called()
-        self.assertTrue(e.alive())
-        self.assertFalse(e.ctl.locked())
+# CancelledDispatch needs the FakeChild fixture from test_pump_framing (fork df27de1c, not ported to 0.2 yet).
