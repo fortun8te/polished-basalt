@@ -212,6 +212,7 @@ int decode(Context& context) {
         }
         const double pool_ms0 = drive.cpu_ms;
         const int64_t misses0 = drive.d.multi_misses, entries0 = drive.d.multi_entries;
+        int64_t miss_seen = misses0;   // the CPU-miss count when the last window ended
         while ((int64_t) produced.size() < o.max_new) {
             const Clock::time_point t0 = Clock::now();
             int T = S_mtp;
@@ -220,14 +221,15 @@ int decode(Context& context) {
                 while (T < S_mtp && basalt::core::draft_keep(dprob.data(), T - 1, cum_adapt.th())) ++T;
             }
             if (first_window) T = 1;
-            bool from_sfx = false;
+            bool from_sfx = false, sfx_agree = true;
             int sfx_match = 0;
             if (o.suffix_draft > 0 && !first_window) {
                 const int k = sfx.propose(o.spec - 1, sbuf.data());
                 sfx_match = sfx.last_match();
-                if (k > 0) {
-                    const basalt::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match);
-                    if (pk.lookup) { T = pk.t; from_sfx = true; }
+                if (k > 0) {   // a lookup that differs from the MTP's first draft is the policy's call
+                    const bool agree = !use_mtp || sbuf[0] == drafts[0];
+                    const basalt::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match, agree);
+                    if (pk.lookup) { T = pk.t; from_sfx = true; sfx_agree = agree; }
                 }
             }
             const bool timed_round = !first_window;
@@ -292,6 +294,8 @@ int decode(Context& context) {
                 break;
             }
             if (use_mtp && !from_sfx) cum_adapt.observe(dprob.data(), T - 1, a);
+            if (use_mtp && !from_sfx) cum_adapt.note_misses(T, drive.d.multi_misses - miss_seen, (int) g.n_layers);
+            miss_seen = drive.d.multi_misses;
             if (use_mtp) mtp.set_cum_th(cum_adapt.th());
             const bool drafted = !use_mtp || (int64_t) produced.size() >= o.max_new ||
                                  mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data());
@@ -304,7 +308,7 @@ int decode(Context& context) {
             p += a + 1;
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             total_ms += round_ms;
-            if (timed_round) policy.observe(from_sfx, T, a, sfx_match, round_ms);
+            if (timed_round) policy.observe(from_sfx, T, a, sfx_match, round_ms, sfx_agree);
             if (rounds % 64 == 0)
                 basalt::log::info("basalt generate", "position %lld, %lld tokens, %lld rounds", (long long) p,
                              (long long) produced.size(), (long long) rounds);
