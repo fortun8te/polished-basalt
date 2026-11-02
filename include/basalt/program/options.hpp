@@ -111,6 +111,9 @@ struct Options {
     /// `expert_profile_save_min` minutes between requests.  Empty (the default): nothing is counted or written.
     std::string expert_profile_save;
     double expert_profile_save_min = 10.0;
+    /// `--expert-cache-pin FILE`: with `--expert-cache auto`, the slot count the first start settles on, kept in FILE
+    /// and used by later starts so the same experts are GPU-computed every run.  Empty: sized on every start.
+    std::string expert_cache_pin;
     /// Capture each layer as THREE graphs and time them from outside the capture, which is the only
     /// valid way to get a per-stage table on the real graph.  Prints and exits; it is a measurement, not a run.
     bool gpu_stages = false;

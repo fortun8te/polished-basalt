@@ -579,6 +579,13 @@ void mid_chain_init() {
         MID_TRIPLES
 #undef X
     }
+    // The hand-offs need every CTA resident at once, so the grid must fit the SMs by occupancy: a CTA that gets no SM
+    // leaves the others spinning to the bound.
+    for (int t = 1; ok && t <= kMidChainMaxT; ++t) {
+        int per_sm = 0;
+        ok = cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, mid_pick(t, 0, 0, 0), CT, SMEM_MAX) == cudaSuccess &&
+             per_sm >= 1 && per_sm * sms >= d.ctas;
+    }
     cudaDeviceSynchronize();
     d.ok = ok && cudaGetLastError() == cudaSuccess;
     if (!d.ok) {
@@ -629,7 +636,11 @@ void mid_chain(const MidChainArgs& a, void* stream) {
     // set the next one uses once their predecessor has completed (see the kernel)
     p.par = (unsigned) (a.ord & 1);
     if (a.ord == 0) cudaMemsetAsync(d.cnt, 0, (2 * NCTR + 1) * 4, (cudaStream_t) stream);
-    launch_pdl(mid_pick(a.T, a.type_q, a.type_z, a.type_o, a.stamps != nullptr), dim3(a.ctas > 0 ? a.ctas : d.ctas), dim3(CT), (size_t) SMEM_MAX, (cudaStream_t) stream, p);
+    // A plain launch: started under programmatic serialization, the chain's CTAs could take SMs that the kernel before
+    // it still holds, and the hand-offs wait for CTAs that never get one.  Its pdl_wait is a no-op when launched plain.
+    void* args[] = {&p};
+    cudaLaunchKernel((const void*) mid_pick(a.T, a.type_q, a.type_z, a.type_o, a.stamps != nullptr), dim3(a.ctas > 0 ? a.ctas : d.ctas),
+                     dim3(CT), args, (size_t) SMEM_MAX, (cudaStream_t) stream);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "mid_chain: %s", cudaGetErrorString(e));

@@ -233,6 +233,7 @@ std::optional<int> parse_options(int argc, char** argv, Options& o, std::string&
         else if (a == "--expert-profile-save") o.expert_profile_save = next("--expert-profile-save");
         else if (a == "--expert-profile-save-every")
             o.expert_profile_save_min = std::atof(next("--expert-profile-save-every"));
+        else if (a == "--expert-cache-pin") o.expert_cache_pin = next("--expert-cache-pin");
         else if (a == "--gpu-stages") o.gpu_stages = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
         else if (a == "--shared-expert-arena") o.shared_expert_arena = next("--shared-expert-arena");

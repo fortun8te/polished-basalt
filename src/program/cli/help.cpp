@@ -153,6 +153,8 @@ void usage() {
                  "                       left after the weights, the session and --vram-reserve-mib\n"
                  "  --vram-reserve-mib N  VRAM left free on the primary GPU for graphs, scratch and the head when\n"
                  "                       --expert-cache auto sizes the tier (default 700; at least 256)\n"
+                 "  --expert-cache-pin FILE  with --expert-cache auto: the slot count of the first start is kept in\n"
+                 "                       FILE and used by later starts (the same experts on the GPU each run)\n"
                  "  --peer-exclusive     with --resident-experts: experts on the peer are held only there, not\n"
                  "                       also in RAM (less RAM).  The peer is filled from the file; swaps move\n"
                  "                       peer-held experts between the GPUs and RAM through host memory.  Auto when not set\n"

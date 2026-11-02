@@ -1,6 +1,7 @@
 """Engine settings, tokenizer and vision inputs for a .basalt model file, unpacked once into the cache directory."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -29,6 +30,15 @@ def cache_root() -> Path:
 def cache_dir(mf: ModelFile) -> Path:
     """One cache directory per model, named by the meta section's sha256 prefix."""
     return cache_root() / mf.sections["meta"][2].hex()[:16]
+
+
+def with_expert_cache_pin(words: list[str], cdir: Path) -> list[str]:
+    """`words` plus a pin file for an auto expert cache in the model cache folder `cdir`.  The name carries the engine
+    arguments, so a changed setting sizes the cache again; a fixed size or a pin named by the caller is left alone."""
+    if flag_value(words, "--expert-cache") not in (None, "auto") or flag_value(words, "--expert-cache-pin"):
+        return words
+    key = hashlib.sha256(" ".join(words).encode()).hexdigest()[:12]
+    return words + ["--expert-cache-pin", str(cdir / f"expert-cache-{key}.pin")]
 
 
 def with_conversation_dir(words: list[str], cdir: Path) -> list[str]:
@@ -129,7 +139,7 @@ def model_config(path: str, engine_bin: str, vision: bool | str = False,
     meta = json.loads(mf.read("meta"))
     path = os.path.abspath(path)
     cdir = cache_dir(mf)
-    words = with_conversation_dir(list(engine_words or []), cdir)
+    words = with_expert_cache_pin(with_conversation_dir(list(engine_words or []), cdir), cdir)
     args = ["--model", path]   # settings come from the engine defaults and the server
     args += words
     cdir.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,15 @@
 #include "context.hpp"
 
+#include <fstream>
+
 namespace basalt::program::generate {
+
+// --expert-cache-pin FILE holds the slot count as text; a missing or unreadable file is no pin
+static int read_expert_pin(const std::string& path) {
+    std::ifstream in(path);
+    int n = 0;
+    return !path.empty() && (in >> n) && n > 0 ? n : 0;
+}
 
 int cache_size(Context& context) {
     auto& o = *context.o;
@@ -66,6 +75,14 @@ int cache_size(Context& context) {
     // Profiled slots are padded; sizing and allocation must charge the same stride.
     const uint64_t max_cache_blob = basalt::kernels::cpu::expert_layout().max_blob;
     const uint64_t cache_slot_bytes = profile.empty() ? max_cache_blob : (max_cache_blob + 255) / 256 * 256;
+    // --expert-cache-pin: an auto start whose pin file holds a count takes it (the same tiers every run); an auto
+    // start without one sizes the cache below and writes the count it settles on
+    const bool auto_pin = o.expert_cache < 0 && !o.expert_cache_pin.empty();
+    const int pin_slots = auto_pin ? read_expert_pin(o.expert_cache_pin) : 0;
+    if (pin_slots > 0) {
+        o.expert_cache = pin_slots;
+        basalt::log::info("basalt generate", "expert cache %d slots, from the pin in %s", pin_slots, o.expert_cache_pin.c_str());
+    }
     const bool auto_cache = o.expert_cache < 0;
     if (o.expert_cache < 0) {
         // the prompt path's cuBLAS handle is made now, so the free figure below already has its device memory out
@@ -230,18 +247,24 @@ int cache_size(Context& context) {
     // IQ3_XXS experts than slots of the largest blob would.
     std::vector<int64_t> sized_slots;
     if (o.expert_cache > 0 && !profile.empty()) {
-        size_t free_b = 0, total_b = 0;
-        cudaMemGetInfo(&free_b, &total_b);
         const auto& lay = basalt::kernels::cpu::expert_layout();
-        const uint64_t budget = (uint64_t) o.expert_cache * cache_slot_bytes;   // what the uniform sizing granted
-        uint64_t used = 0;
-        size_t free_room = free_b > ((size_t) o.vram_reserve_mib << 20) ? free_b - ((size_t) o.vram_reserve_mib << 20) : 0;
-        const uint64_t cap = std::min<uint64_t>(budget, (uint64_t) free_room);
-        for (const auto& pr : profile) {
-            const uint64_t b = (lay.blob_bytes(pr.first) + 255) / 256 * 256;
-            if (used + b > cap) break;
-            used += b;
-            sized_slots.push_back((int64_t) lay.blob_bytes(pr.first));
+        if (pin_slots > 0) {
+            // the pinned count: the profile's first slots, as the start that wrote the pin sized them (no VRAM read)
+            for (size_t i = 0; i < profile.size() && (int) i < o.expert_cache; ++i)
+                sized_slots.push_back((int64_t) lay.blob_bytes(profile[i].first));
+        } else {
+            size_t free_b = 0, total_b = 0;
+            cudaMemGetInfo(&free_b, &total_b);
+            const uint64_t budget = (uint64_t) o.expert_cache * cache_slot_bytes;   // what the uniform sizing granted
+            uint64_t used = 0;
+            size_t free_room = free_b > ((size_t) o.vram_reserve_mib << 20) ? free_b - ((size_t) o.vram_reserve_mib << 20) : 0;
+            const uint64_t cap = std::min<uint64_t>(budget, (uint64_t) free_room);
+            for (const auto& pr : profile) {
+                const uint64_t b = (lay.blob_bytes(pr.first) + 255) / 256 * 256;
+                if (used + b > cap) break;
+                used += b;
+                sized_slots.push_back((int64_t) lay.blob_bytes(pr.first));
+            }
         }
         o.expert_cache = (int) sized_slots.size();
     }
@@ -320,6 +343,9 @@ int cache_size(Context& context) {
                                  commit, o.expert_cache);
                     continue;
                 }
+                if (pin_slots > 0)
+                    basalt::log::error("basalt generate", "the expert cache pinned in %s (%d slots) does not fit the VRAM "
+                                         "free now: delete the file to size it again", o.expert_cache_pin.c_str(), o.expert_cache);
                 return fatal_start_error(err);
             }
             if (!auto_cache || attempt - failed >= 6) break;
@@ -344,6 +370,13 @@ int cache_size(Context& context) {
             basalt::log::warn("basalt generate", "expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
                                  "page file lets it use more of the free VRAM",
                          o.expert_cache, (double) xcache.bytes() / 1073741824.0, failed);
+    }
+    // the pin: the count this auto start settled on, after any shrink; later starts with the same file use it
+    if (auto_pin && pin_slots == 0 && o.expert_cache > 0) {
+        std::ofstream out(o.expert_cache_pin, std::ios::trunc);
+        if (out) out << o.expert_cache << "\n";
+        if (out) basalt::log::info("basalt generate", "expert cache %d slots, pinned in %s", o.expert_cache, o.expert_cache_pin.c_str());
+        else basalt::log::warn("basalt generate", "expert cache pin %s not written", o.expert_cache_pin.c_str());
     }
     // the slots wholly or partly in the elastic tail: the ones the KV may take back
     const int64_t kv_tail_slots = xcache.valid() && xcache.elastic_bytes() > 0
