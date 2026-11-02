@@ -213,6 +213,12 @@ bool Verifier::run_serve(PoolMultiFn pool, void* user, std::string& err) {
 int Verifier::serve_poll(PoolMultiFn pool, void* user, std::string& err) {
     using namespace basalt::kernels;
     if (ar_on()) return 1;   // the graph plans every layer on the device
+    // The common poll: still waiting for the same ring, and not the poll that checks the clock.  It returns as the
+    // loop below would, without the device switch (a driver call) and the setup.
+    if (fl_.waiting && fl_.k < le_ - lb_ && *(volatile uint32_t*) h_seq_ < (uint32_t) (fl_.k + 1) && ((fl_.spins + 1) & 1023u) != 0) {
+        ++fl_.spins;
+        return 0;
+    }
     const OnDevice on_device(device_);
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
@@ -257,7 +263,7 @@ int Verifier::serve_poll(PoolMultiFn pool, void* user, std::string& err) {
         const Clock::time_point a = fl_.wait_t0;
         const Clock::time_point b = Clock::now();
         cur_layer_ = want - 1;
-        set_plan_slot();
+        if (k == 0) set_plan_slot();   // the window's plan pointers do not change between its layers
         const int n = T;
         progress_at("verify window: the CPU experts of layer", l);
         if (remote_opt_) remote_opt_->begin(h_w_, 0, n);

@@ -983,6 +983,13 @@ void launch_one(const void* w, const void* x, float* y, int n_in, int n_out, int
                ncols);
 }
 
+// The one-tile layout's shape and alignment checks without the device-size term: the same reduction order on every card.
+template<int TYPE>
+bool one_fits(const void* w, int n_in) {
+    return ((uintptr_t) w & 15) == 0 && (n_in / 256) * Fmt<TYPE>::SB % 16 == 0 &&
+           one_smem_bytes<TYPE, 24>(n_in) <= 99 * 1024;
+}
+
 // The layout follows the shape alone (never the column count): where every 16-row tile has a block of its own and fits
 // in shared memory, one bulk copy per row, issued before the grid dependency wait; else whole 16-row tiles, two in
 // flight on a grid of one block per SM, where the weights are 16-byte aligned and two tiles fit in 90 KB;
@@ -1047,6 +1054,43 @@ void dense_tc(int type, const void* w, const void* x, float* y, int n_in, int n_
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "dense_tc: %s", cudaGetErrorString(e));
+        std::exit(1);
+    }
+}
+
+bool dense_tc_one_supported(int t, int n_in, const void* w) noexcept {
+    if (!dense_tc_supported(t, n_in)) return false;
+    switch (t) {
+        case 12: return one_fits<12>(w, n_in);
+        case 13: return one_fits<13>(w, n_in);
+        case 14: return one_fits<14>(w, n_in);
+        case 21: return one_fits<21>(w, n_in);
+        case 11: return one_fits<11>(w, n_in);
+        case 42: return one_fits<42>(w, n_in);
+        case 8: return one_fits<8>(w, n_in);
+        default: return one_fits<23>(w, n_in);
+    }
+}
+
+void dense_tc_one(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols, void* stream) {
+    if (!dense_tc_one_supported(type, n_in, w) || ncols < 1 || ncols > kMaxCols || n_out < 1 || ((uintptr_t) x & 3) != 0) {
+        basalt::log::error("basalt", "dense_tc_one: type %d n_in %d n_out %d ncols %d not supported", type, n_in, n_out, ncols);
+        std::exit(1);
+    }
+    const auto s = (cudaStream_t) stream;
+    switch (type) {
+        case 12: launch_one<12, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        case 13: launch_one<13, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        case 14: launch_one<14, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        case 21: launch_one<21, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        case 11: launch_one<11, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        case 42: launch_one<42, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        case 8: launch_one<8, 24>(w, x, y, n_in, n_out, ncols, s); break;
+        default: launch_one<23, 24>(w, x, y, n_in, n_out, ncols, s); break;
+    }
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        basalt::log::error("basalt", "dense_tc_one: %s", cudaGetErrorString(e));
         std::exit(1);
     }
 }

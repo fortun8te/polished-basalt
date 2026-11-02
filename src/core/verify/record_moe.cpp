@@ -149,16 +149,29 @@ bool Verifier::WindowRecorder::post(int64_t l) {
             copy_i32_from_mapped(pl, v_.m_plan_, v_.plan_i32_, cs);
         }
         stamp(l, 19);
+        // Stage the PCIe groups with a copy kernel, then point at staging.  The plan is whole once flag A is seen, so
+        // the copy runs on its own stream beside the VRAM groups, into the layer-parity half of staging (the layer
+        // before last's groups are done by stream order), and the PCIe groups wait for its join event.
+        uint8_t* const stage = v_.staging_ + ((l - v_.lb_) & 1) * kStagingBlobs * (int64_t) lay.max_blob;
+        const bool fetch_side = !v_.prof_on_ && v_.fetch_s_ != nullptr && v_.ev_fetch_fork_ != nullptr &&
+                                v_.ev_fetch_join_ != nullptr;
+        const auto fetch = [&](cudaStream_t s) {
+            if (v_.device_plan_) wait_flag_ge_or(v_.m_flagB_, ring, v_.skip_, s);
+            else wait_flag_ge(v_.m_flagB_, ring, s);              // the PCIe groups are planned
+            fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) kStagingBlobs, s);
+            rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), s);
+        };
+        if (fetch_side) {
+            cudaEventRecord(v_.ev_fetch_fork_, cs);
+            cudaStreamWaitEvent(v_.fetch_s_, v_.ev_fetch_fork_, 0);
+            PdlScope pf(false);
+            fetch(v_.fetch_s_);
+            cudaEventRecord(v_.ev_fetch_join_, v_.fetch_s_);
+        }
         grouped(p_ptr, p_start, p_counts, 0, hit_out);
         stamp(l, 20);
-        if (v_.device_plan_) wait_flag_ge_or(v_.m_flagB_, ring, v_.skip_, cs);
-        else wait_flag_ge(v_.m_flagB_, ring, cs);                 // the PCIe groups are planned
-        {   // stage them with a copy kernel, then point at staging
-            const int64_t per = kStagingBlobs;
-            uint8_t* stage = v_.staging_;
-            fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
-            rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
-        }
+        if (fetch_side) cudaStreamWaitEvent(cs, v_.ev_fetch_join_, 0);
+        else fetch(cs);
         stamp(l, 21);
         // the PCIe share is pcie_frac of the misses: a few groups when the cache is cold, usually none (none when the
         // share is 0), so its launch is kPcieGroupRows block rows striding over the groups, not cap of them

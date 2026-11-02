@@ -30,6 +30,12 @@ bool dense_tc_supported(int ggml_type, int n_in, int n_out, const void* weights)
 void dense_tc(int ggml_type, const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
               void* stream);
 
+/// The one-tile kernel on any device size (one block per 16-row tile, a grid larger than the SM count runs in waves):
+/// the reduction order of the layouts that give a card with enough SMs, so a result does not depend on the card.
+bool dense_tc_one_supported(int ggml_type, int n_in, const void* weights) noexcept;
+void dense_tc_one(int ggml_type, const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                  void* stream);
+
 /// Two projections of one input in one launch (whole 16-row tiles, the first matrix's then the second's; types as
 /// above plus IQ3_S): each output is bitwise the same for every ncols and column.
 bool dense_tc_pair_supported(int type0, int type1, int n_in) noexcept;

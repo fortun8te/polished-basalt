@@ -45,6 +45,7 @@ Verifier::~Verifier() {
     if (sh_hi_) cudaStreamSynchronize(sh_hi_);
     if (sh_hi2_) cudaStreamSynchronize(sh_hi2_);
     if (ring_hi_) cudaStreamSynchronize(ring_hi_);
+    if (fetch_s_) cudaStreamSynchronize(fetch_s_);
     for (cudaStream_t q : qs_)
         if (q) cudaStreamSynchronize(q);
     dm_free();
@@ -82,6 +83,9 @@ Verifier::~Verifier() {
     if (sh_hi2_) cudaStreamDestroy(sh_hi2_);
     if (ev_sh2_) cudaEventDestroy(ev_sh2_);
     if (ring_hi_) cudaStreamDestroy(ring_hi_);
+    if (fetch_s_) cudaStreamDestroy(fetch_s_);
+    if (ev_fetch_fork_) cudaEventDestroy(ev_fetch_fork_);
+    if (ev_fetch_join_) cudaEventDestroy(ev_fetch_join_);
     if (ple_s_) cudaStreamDestroy(ple_s_);
     if (ev_ple_fork_) cudaEventDestroy(ev_ple_fork_);
     if (ev_ple_join_) cudaEventDestroy(ev_ple_join_);
@@ -236,7 +240,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         shared_ = b.take<float>(T * N); parts_ = b.take<float>(T * K * N); hit_out_ = b.take<float>(T * K * N);
         hit_slot_ = b.take<int32_t>(T * K); hit_dst_ = b.take<int32_t>(T * K); hit_count_ = b.take<int32_t>(4);
         plan_ = b.take<int32_t>((uint64_t) plan_i32_ + 16);
-        staging_ = b.take<uint8_t>((uint64_t) kStagingBlobs * basalt::kernels::cpu::expert_layout().max_blob);
+        staging_ = b.take<uint8_t>(2 * (uint64_t) kStagingBlobs * basalt::kernels::cpu::expert_layout().max_blob);   // two, by layer parity
         hit_xq_ = b.take<uint8_t>(T * (N / 32) * 34); hit_xs_ = b.take<float>(T * (N / 32));
         nat_xq_ = b.take<uint8_t>(T * (N / 32) * 36);
         hit_scratch_ = b.take<uint8_t>(std::max<uint64_t>(
@@ -294,6 +298,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             cudaStreamCreateWithPriority(&ring_hi_, cudaStreamNonBlocking, greatest) != cudaSuccess ||
             cudaEventCreateWithFlags(&ev_ring_, cudaEventDisableTiming) != cudaSuccess ||
             cudaEventCreateWithFlags(&ev_ring_join_, cudaEventDisableTiming) != cudaSuccess ||
+            cudaStreamCreateWithFlags(&fetch_s_, cudaStreamNonBlocking) != cudaSuccess ||
+            cudaEventCreateWithFlags(&ev_fetch_fork_, cudaEventDisableTiming) != cudaSuccess ||
+            cudaEventCreateWithFlags(&ev_fetch_join_, cudaEventDisableTiming) != cudaSuccess ||
             cudaStreamCreateWithFlags(&ple_s_, cudaStreamNonBlocking) != cudaSuccess ||
             cudaEventCreateWithFlags(&ev_ple_fork_, cudaEventDisableTiming) != cudaSuccess ||
             cudaEventCreateWithFlags(&ev_ple_join_, cudaEventDisableTiming) != cudaSuccess) {

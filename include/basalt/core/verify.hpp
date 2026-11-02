@@ -667,6 +667,10 @@ private:
     int32_t* plan_ = nullptr;                                     // device copy of the plan block
     uint8_t* staging_ = nullptr;                                  // VRAM slots for the PCIe share of the misses
     static constexpr int64_t kStagingBlobs = 16;
+    // The non-ring staged share's fetch runs on its own stream into a double buffer (staging_ holds two, by layer
+    // parity), event-synced before the PCIe groups read it.
+    cudaStream_t fetch_s_ = nullptr;
+    cudaEvent_t ev_fetch_fork_ = nullptr, ev_fetch_join_ = nullptr;
     static constexpr int64_t kPcieGroupRows = 4;                  // the PCIe call's groups side by side (of <= 16)
     uint8_t* hit_xq_ = nullptr;
     uint8_t* nat_xq_ = nullptr;   // q8_1 activations for a native pack's grouped experts

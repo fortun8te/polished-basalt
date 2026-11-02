@@ -199,7 +199,9 @@ bool Verifier::dm_init(std::string& err) {
     // Layers whose blobs differ in size (mixed-type packs) share one slot stride, sized for the largest blob.
     const bool one_card = d->pdev < 0 && d->xp.empty() && lb_ == 0 && le_ == g.n_layers && hand_in_ == nullptr &&
                           warm_src_ != nullptr && staging_ != nullptr;
-    const bool ram_mapped = one_card && warm_src_->pcie_layer(0);
+    // every staged layer needs its RAM copy mapped: a copy kernel that reads an unregistered page faults
+    bool ram_mapped = one_card;
+    for (int64_t l = 0; ram_mapped && l < g.n_layers; ++l) ram_mapped = warm_src_->pcie_layer(l);
     const bool stage_allowed = basalt::platform::fork_switch("STAGING");   // BASALT_FORK_STAGING=0: no staged share
     bool stage = ram_mapped && stage_allowed;
     int64_t blob = 0;
