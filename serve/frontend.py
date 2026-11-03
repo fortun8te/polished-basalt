@@ -788,10 +788,31 @@ class OutputParser:
         self.lead = False
         self.rtail = ""              # last reasoning character sent
         self.schemas = {t.get("name"): t for t in tools or []}
+        # Other spellings of a declared namespace tool (`ns.member`: ns__member, ns=member, ns_member, member; and
+        # `a__b` written `a_b`) read as the declared name, but only when exactly one declared tool has that spelling
+        # and no tool is declared under it.
+        aliases: dict[str, set] = {}
+        for name in self.schemas:
+            if not isinstance(name, str):
+                continue
+            if "." in name:
+                namespace, member = name.rsplit(".", 1)
+                for alias in (f"{namespace}__{member}", f"{namespace}={member}", f"{namespace}_{member}", member):
+                    aliases.setdefault(alias, set()).add(name)
+            if "__" in name:
+                aliases.setdefault(name.replace("__", "_"), set()).add(name)
+        self.aliases = {alias: next(iter(names)) for alias, names in aliases.items()
+                        if len(names) == 1 and alias not in self.schemas}
         # stream_tools: also report a call while it is written ("tool_start", "tool_args" pieces) before "tool_call"
         self.stream_tools = stream_tools
         self.fence, self.line, self.ticks = "", "", 0     # code fence, current line and backticks of the answer so far
         self._reset_scan()
+
+    def _tool_name(self, name: str) -> str | None:
+        """The declared tool a written name stands for: the name itself when declared, else its unambiguous alias;
+        None when it is neither (the call stays text). Names are read exactly as written."""
+        name = self.aliases.get(name, name)
+        return name if name in self.schemas else None
 
     def _track(self, text: str) -> str:
         """Follow the answer text that has gone out: the open code fence (``` or ~~~), the current line, and the
@@ -844,8 +865,8 @@ class OutputParser:
                 b = rest.find(">", a + 10) if a >= 0 else -1
                 if b < 0:
                     return out
-                name = rest[a + 10:b]
-                if name not in self.schemas:
+                name = self._tool_name(rest[a + 10:b])
+                if name is None:
                     return out
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
@@ -1011,11 +1032,12 @@ class OutputParser:
                     return out
                 body = self.buf[:i]
                 self.buf = self.buf[i + len(CALL_END):]
-                name = body.strip()[len("<function="):].split(">", 1)[0]
+                name = self._tool_name(body.strip()[len("<function="):].split(">", 1)[0])
                 try:
-                    if name not in self.schemas:
+                    if name is None:
                         raise ValueError("undeclared tool")
                     call = parse_tool_call(body, self.schemas[name])
+                    call.name = name
                 except ValueError:
                     if self.scall is None:
                         out.append(Event("content", self._track(CALL_START + body + CALL_END)))
