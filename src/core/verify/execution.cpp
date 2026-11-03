@@ -8,6 +8,7 @@
 #include "basalt/core/remote_expert_opt.hpp"
 #include "basalt/core/on_device.hpp"
 #include "basalt/platform/compiler.hpp"
+#include "basalt/kernels/cpu/expert_layout.hpp"
 #include "basalt/kernels/cpu/pool.hpp"
 #include "basalt/kernels/pdl.hpp"
 #include "basalt/kernels/ngram.hpp"
