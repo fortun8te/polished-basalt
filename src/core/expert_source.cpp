@@ -2215,13 +2215,21 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
     const auto c0 = std::chrono::steady_clock::now();
-    if (!d.usage.empty())
-        for (int64_t i = 0; i < n_tok * k; ++i)
-            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
     // ---- the GPU's share, decided and published FIRST so the GPU starts while the CPU works.  Distinct experts in
     // routing order; resident ones and the last pcie_num/256 of the missed ones go to the GPU.
     const int64_t n = n_tok * k;
-    if (n <= kMaxWindowEntries) advise_routed(d, ids, n);
+    // Bookkeeping and read-ahead hints that decide nothing: the usage counts, and the page-cache advice (a mutex and a
+    // thread wake-up).  Done once, after the plan is published when this call publishes one, so the GPU is not left
+    // waiting on them; before anything else reads the routed experts otherwise.
+    bool hints_done = false;
+    const auto hints = [&] {
+        if (hints_done) return;
+        hints_done = true;
+        if (!d.usage.empty())
+            for (int64_t i = 0; i < n_tok * k; ++i)
+                if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+        if (n <= kMaxWindowEntries) advise_routed(d, ids, n);
+    };
     int32_t kind[kMaxWindowEntries];       // per entry: -1 CPU, 0 VRAM, 1 PCIe
     // the device planned the layer; only its CPU entries are the pool's
     const bool ext = d.plan != nullptr && d.plan->ext_kind != nullptr && n <= kMaxWindowEntries;
@@ -2304,6 +2312,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         std::atomic_thread_fence(std::memory_order_seq_cst);
         if (P.publish) P.publish(P.ctx);
         if (P.staged) P.staged(P.ctx);
+        hints();
     } else {
         for (int64_t i = 0; i < n; ++i) {
             const int32_t e = ids[i];
@@ -2312,6 +2321,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     : (e >= 0 && e < d.n_expert && d.peer != nullptr && d.peer->has(d.layers, e)) ? 2 : -1;
         }
     }
+    hints();   // no plan was published here
     if (d.peer != nullptr && !ext) {         // multi-GPU: start the second GPU's share before the CPU's own work
         std::string perr;
         if (!d.peer->launch(d.layers, x_f, ids, n_tok, k, kind, perr, out)) {

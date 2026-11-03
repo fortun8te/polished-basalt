@@ -27,6 +27,27 @@
 
 namespace basalt::platform {
 
+namespace {
+/// BASALT_LARGE_PAGES=0 skips the large-page attempt (Windows MEM_LARGE_PAGES, Linux hugetlb) and takes the ordinary
+/// allocation. Unset or anything else leaves the attempt on. Addresses only: no arithmetic depends on it.
+bool large_pages_disabled() {
+    static const bool off = [] {
+#if defined(_WIN32)
+        char* v = nullptr;
+        size_t len = 0;
+        const bool set = _dupenv_s(&v, &len, "BASALT_LARGE_PAGES") == 0 && v != nullptr;
+        const bool zero = set && std::strcmp(v, "0") == 0;
+        std::free(v);
+        return zero;
+#else
+        const char* v = std::getenv("BASALT_LARGE_PAGES");
+        return v != nullptr && std::strcmp(v, "0") == 0;
+#endif
+    }();
+    return off;
+}
+}  // namespace
+
 #if defined(_WIN32)
 namespace {
 /// Enables one privilege in this process's token. A privilege can be assigned to the account and still be absent
@@ -606,9 +627,12 @@ static void* alloc_region_raw(uint64_t bytes, RegionBacking& got, std::string& n
     // MEM_LARGE_PAGES needs SeLockMemoryPrivilege, and the account having it assigned is not enough: the process
     // enables it in its own token first. An account without the assignment fails here and falls through to the
     // ordinary allocation below, which is the expected outcome rather than an error.
-    enable_privilege(L"SeLockMemoryPrivilege");
-    const SIZE_T large = GetLargePageMinimum();
-    if (large > 0) {
+    const bool lp_off = large_pages_disabled();
+    if (!lp_off) enable_privilege(L"SeLockMemoryPrivilege");
+    const SIZE_T large = lp_off ? 0 : GetLargePageMinimum();
+    if (lp_off) {
+        note = "large pages disabled by BASALT_LARGE_PAGES=0; using 4 KB pages";
+    } else if (large > 0) {
         // The requested size must be an exact multiple of the large-page minimum; the slack is under one page.
         const SIZE_T lbytes = (SIZE_T) (((SIZE_T) bytes + large - 1) / large * large);
         void* p = VirtualAlloc(nullptr, lbytes, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
@@ -788,7 +812,9 @@ static void* alloc_region_raw(uint64_t bytes, RegionBacking& got, std::string& n
         return (uint8_t*) map + kSharedArenaHeaderBytes;
     }
 
-    {
+    if (large_pages_disabled()) {
+        note = "hugetlb disabled by BASALT_LARGE_PAGES=0; using 4 KB pages";
+    } else {
         void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
         if (p != MAP_FAILED) {

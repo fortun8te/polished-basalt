@@ -646,6 +646,7 @@ private:
     float route_prior_ = 0.0f;
     uint32_t cur_layer_ = 0;
     static void publish_plan(void* ctx);
+    static void publish_plan_ab(void* ctx);   ///< flag A and flag B in one call
     void set_plan_slot();
     float* h_ymiss_ = nullptr;   float* m_ymiss_ = nullptr;     // T * k * n_embd
 

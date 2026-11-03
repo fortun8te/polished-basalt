@@ -445,4 +445,14 @@ void Verifier::publish_plan(void* ctx) {
     *(volatile uint32_t*) v->h_flagA_ = v->cur_layer_ + 1;
 }
 
+// Flags A and B together: the pool raises them back to back on this thread with nothing between (the plan is whole
+// before either), so one call and one fence do both.  B keeps its compare-exchange (the release path may raise it too).
+void Verifier::publish_plan_ab(void* ctx) {
+    Verifier* v = (Verifier*) ctx;
+    _mm_sfence();
+    const uint32_t want = v->cur_layer_ + 1;
+    *(volatile uint32_t*) v->h_flagA_ = want;
+    raise_flag(v->h_flagB_, want);
+}
+
 }  // namespace basalt::core

@@ -46,6 +46,11 @@ system's long-path policy on or off.
   default; locking the resident expert copy needs "Increase a process working set", which is
   granted to Users, so it works without elevation. The engine enables whichever its token holds.
   Without large pages it falls back to 4 KiB pages and says so at start-up.
+  `BASALT_LARGE_PAGES=0` skips the large-page attempt (Windows `MEM_LARGE_PAGES`, Linux hugetlb)
+  and takes the ordinary allocation; unset or any other value leaves it on. The pinned host arena
+  (the host expert tier) is the buffer that uses it; the start-up `backing:` note says which path ran.
+  To grant the privilege to a non-administrator account: `secpol.msc` > Local Policies > User Rights
+  Assignment > Lock pages in memory > Add User or Group, then sign out and back in.
 - Shared arena files and cgroup quotas do not exist. The engine refuses the first and reports no
   container limit.
 - The n-gram table (`--ple-io direct`) is read through the file cache. NTFS completes the

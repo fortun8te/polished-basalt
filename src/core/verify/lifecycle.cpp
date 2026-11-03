@@ -211,8 +211,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.ptr2 = sink_.ptr + cap;
         sink_.start2 = h_plan_ + ptr_off + 4 * cap;
         sink_.cap = cap;
-        sink_.publish = &Verifier::publish_plan;
-        sink_.staged = &Verifier::raise_flag_b;
+        sink_.publish = &Verifier::publish_plan_ab;   // flag A, then flag B, in one call
+        sink_.staged = nullptr;
         sink_.ctx = this;
     }
 
