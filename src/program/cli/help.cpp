@@ -90,7 +90,7 @@ void usage() {
                  "                       the conversation checkpoint (a trailing effort turn; default -1 = off)\n"
                  "  --short-read N       --serve: read at most N fresh text tokens through the decode windows instead\n"
                  "                       of the batched prompt path (default 64, 0 = off)\n"
-                 "  --verify-max-rows N  verify window row cap, 2..12 (default 12; 8 = the 8-row engine, bit-identical)\n"
+                 "  --verify-max-rows N  verify window row cap, 2..12 (default 8; 12 = the 12-row window, unverified)\n"
                  "  --suffix-draft N     prompt lookup: draft from an earlier repeat of the last N+ tokens of context\n"
                  "                       when it pays (default 3; 0 = MTP only)\n"
                  "  --spec N             speculative decoding: verify windows of at most N tokens (the last accepted\n"

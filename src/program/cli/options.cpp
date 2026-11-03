@@ -210,8 +210,8 @@ std::optional<int> validate_kv_streaming(const Options& o) {
 }
 
 bool normalize_speculation_options(Options& o) {
-    // the window cap: --verify-max-rows (default 12; the BASALT_VERIFY_MAX_ROWS env var sets the flag's default)
-    if (o.verify_max_rows == 12) {
+    // the window cap: --verify-max-rows (default 8; the BASALT_VERIFY_MAX_ROWS env var sets the flag's default)
+    if (o.verify_max_rows == 8) {
         const char* e = std::getenv("BASALT_VERIFY_MAX_ROWS");
         if (e != nullptr && *e != '\0') o.verify_max_rows = std::atoi(e);
     }

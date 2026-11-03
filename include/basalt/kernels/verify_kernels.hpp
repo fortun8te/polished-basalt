@@ -21,7 +21,7 @@
 namespace basalt::kernels {
 
 /// The verify window's compile-time capacity (rows).  The window actually run is bounded by the runtime limit
-/// `verify_max_rows()` (default kVerifyMaxT; `--verify-max-rows 8` restores the 8-row engine).  Rows 1..kVerifyBaseT
+/// `verify_max_rows()` (default kVerifyBaseT = 8 until the 12-row work is verified; `--verify-max-rows 8` restores the 8-row engine).  Rows 1..kVerifyBaseT
 /// run exactly the 8-row engine's launches and reduction orders.
 inline constexpr int kVerifyMaxT = 12;
 inline constexpr int kVerifyBaseT = 8;   ///< the kernels that were written for 8 rows keep that width; wider windows run them in passes of 8

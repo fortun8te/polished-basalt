@@ -7,7 +7,7 @@
 
 namespace basalt::kernels {
 namespace {
-// 0: not set yet (BASALT_VERIFY_MAX_ROWS, else kVerifyMaxT)
+// 0: not set yet (BASALT_VERIFY_MAX_ROWS, else kVerifyBaseT)
 std::atomic<int> g_rows{0};
 int clamp_rows(long v) { return (int) std::min<long>(std::max<long>(v, 2), kVerifyMaxT); }
 }  // namespace
@@ -16,7 +16,7 @@ int verify_max_rows() {
     int r = g_rows.load(std::memory_order_acquire);
     if (r == 0) {
         const char* e = std::getenv("BASALT_VERIFY_MAX_ROWS");
-        r = e != nullptr && *e != '\0' ? clamp_rows(std::atol(e)) : kVerifyMaxT;
+        r = e != nullptr && *e != '\0' ? clamp_rows(std::atol(e)) : kVerifyBaseT;
         g_rows.store(r, std::memory_order_release);
     }
     return r;
