@@ -25,7 +25,7 @@
 namespace basalt::kernels {
 
 struct HcFusedArgs {
-    XX
+    int T = 0;                          ///< tokens, 1..12 (9..12 run as two reads); token t's rows at the fixed strides below
     const float* R = nullptr;           ///< [T][hc * n_embd]
     float* R_out = nullptr;             ///< == R for the in-place update
     bool apply = false;                 ///< fold the previous half's write
