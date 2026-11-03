@@ -589,23 +589,38 @@ CALL_END = "</tool_call>"
 
 PARAM_END = "</parameter>"
 FUNC_END = "</function>"
+PARAM_START = "<parameter="
+FUNC_START = "<function="
+_QUOTED_OPEN = re.compile(r"<function=[^<>\s]+>\s*(?:<parameter=|</function>)")
 
 
 def param_end(text: str, final: bool = False) -> int:
-    """Where a parameter value ends: the first `</parameter>` followed by `<parameter=` or `</function>`, so the
-    same text inside a value is kept. -1: none yet; -2: candidate awaiting its follower (`final` accepts it)."""
+    """Find a structural parameter close, keeping quoted calls inside the value: a `</parameter>` followed by
+    `<parameter=` or `</function>` counts when every `<function=NAME><parameter=` quoted earlier in the value has its
+    own `</function>`. (A repeated parameter name is not kept in the value: polished-next refuses a duplicate.)
+    -1: none yet; -2: candidate awaiting more output. `final` falls back to the plain structural close."""
     at = text.find(PARAM_END)
+    fallback = -1
     while at >= 0:
         after = text[at + len(PARAM_END):].lstrip()
-        if after.startswith(("<parameter=", FUNC_END)):
-            return at
-        if not after or "<parameter=".startswith(after) or FUNC_END.startswith(after):
-            return at if final else -2
+        candidate = -1
+        if after.startswith(PARAM_START):
+            candidate = at
+        elif after.startswith(FUNC_END):
+            candidate = at
+        elif not after or PARAM_START.startswith(after) or FUNC_END.startswith(after):
+            candidate = at if final else -2
+        if candidate != -1:
+            if len(_QUOTED_OPEN.findall(text, 0, at)) <= text.count(FUNC_END, 0, at):
+                return candidate
+            if fallback < 0:
+                fallback = at
         at = text.find(PARAM_END, at + 1)
-    return -1
+    # An unclosed quoted function must not hide the enclosing call at end of output.
+    return fallback if final else (-2 if fallback >= 0 else -1)
 
 
-def call_end(text: str) -> int:
+def call_end(text: str, final: bool = False) -> int:
     """Where a call body ends: the `</tool_call>` after its own `</function>` (found via param_end); -1: incomplete.
     A body not in the call format ends at the first `</tool_call>`."""
     s = text.lstrip()
@@ -624,7 +639,7 @@ def call_end(text: str) -> int:
             gt = text.find(">", pos)
             if gt < 0:
                 return -1
-            end = param_end(text[gt + 1:])
+            end = param_end(text[gt + 1:], final=final)
             if end < 0:
                 return -1
             pos = gt + 1 + end + len(PARAM_END)
@@ -811,8 +826,9 @@ class OutputParser:
         self.sval_started = False
         self.sdeclared = {}
         self.spname = ""
+        self.svstart = 0
 
-    def _scan(self) -> list[Event]:
+    def _scan(self, final: bool = False) -> list[Event]:
         """Advance the streaming view of the call body."""
         out = []
 
@@ -869,7 +885,10 @@ class OutputParser:
                         self.sp += 1
                         rest = rest[1:]
                     self.sval_started = True
-                end = param_end(rest)
+                    self.svstart = self.sp
+                # the value's own text from its start: quoted openers before the close are counted
+                end = param_end(self.buf[self.svstart:], final=final) if PARAM_END in rest else -1
+                end = end - (self.sp - self.svstart) if end >= 0 else end
                 if end >= 0:
                     value = rest[:end]
                     if value.endswith("\n"):
@@ -887,7 +906,7 @@ class OutputParser:
                     self.sp += safe
                 return out
             elif self.ss == "raw":
-                end = param_end(rest)
+                end = param_end(rest, final=final)
                 if end < 0:
                     return out
                 value = rest[:end]
@@ -927,7 +946,7 @@ class OutputParser:
                     best = max(best, n)
         return best
 
-    def feed(self, delta: str) -> list[Event]:
+    def feed(self, delta: str, *, final: bool = False) -> list[Event]:
         self.buf += delta
         out: list[Event] = []
         while True:
@@ -985,9 +1004,9 @@ class OutputParser:
                 self.buf = self.buf[i + len(CALL_START):]
                 self.state = "call"
             else:
-                i = call_end(self.buf)
+                i = call_end(self.buf, final=final)
                 if self.stream_tools and i < 0:
-                    out += self._scan()
+                    out += self._scan(final=final)
                 if i < 0:
                     return out
                 body = self.buf[:i]
@@ -1005,7 +1024,7 @@ class OutputParser:
                     continue
                 if self.stream_tools:
                     remaining, self.buf = self.buf, body
-                    out += self._scan()
+                    out += self._scan(final=final)
                     self.buf = remaining
                     if self.scall is not None:
                         out.append(Event("tool_args", "}", call=self.scall))
@@ -1018,9 +1037,8 @@ class OutputParser:
     def finish(self) -> list[Event]:
         """End of generation: flush what is held (an unterminated call becomes content; an announced one is left
         unfinished with no "tool_call")."""
-        out = []
+        out = self.feed("", final=True)         # a held quoted-call close is accepted as the plain close
         if self.state == "call" and self.stream_tools and self.scall is not None:
-            out += self._scan()                 # ended inside an announced call
             self.buf = ""
             self._reset_scan()
             return out
