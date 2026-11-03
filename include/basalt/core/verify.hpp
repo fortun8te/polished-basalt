@@ -200,6 +200,9 @@ public:
     /// discarded - a prompt read through windows commits every token - so they cost no sampler launch or sync and
     /// never read a history staged for another position.
     void set_head_sampling(bool on) { head_sampling_ = on; if (next_) next_->set_head_sampling(on); }
+    /// The next window's rows below `t` have their picks discarded (the prompt rows a first window folds in): the
+    /// head leaves those rows' logits approximate, and with head sampling off every row's.  One window only.
+    void set_head_from(int t) { head_from_ = t; if (next_) next_->set_head_from(t); }
     /// On: a sampled window also leaves draft_prob(t), the probability row t's final distribution gives the window's
     /// token t + 1 (t < T - 1), for relaxed acceptance.  The picks are unchanged.  Off by default; set per request.
     void set_draft_probe(bool on) { draft_probe_ = on; if (next_) next_->set_draft_probe(on); }
@@ -521,6 +524,8 @@ private:
     const int32_t* hist_d_ = nullptr;   // penalty-history row (set_history); null = no penalties apply
     int hist_len_ = 0;
     bool head_sampling_ = true;          ///< set_head_sampling
+    int head_from_ = 0;                  ///< set_head_from, for the next window
+    int32_t* h_head_from_ = nullptr; int32_t* m_head_from_ = nullptr;   ///< the window's first row the head scores exactly
     bool draft_probe_ = false;           ///< set_draft_probe
     std::vector<float> logit_bias_host_;
     float* logit_bias_device_ = nullptr;
@@ -729,10 +734,11 @@ private:
     bool gs_live_ = false, gs_split_ = false;
     SessionState* gs_ss_ = nullptr;
     float *gs_h_full_ = nullptr, *gs_h_slice_ = nullptr;   // pinned staging for gs_move: CUDA0's whole layers, the slice
-    uint8_t* vhead_scratch_ = nullptr;   // the two-stage head's histogram and row list (q6k_vhead, q80p_vhead)
+    uint8_t* vhead_scratch_ = nullptr;   // the two-stage head's histogram and thresholds (q6k_vhead), histogram and row list (q80p_vhead)
     int32_t* head_keep_d_ = nullptr;     // q80p_vhead's list length, read by the captured head (null: no such head)
     int head_keep_set_ = 0;              // the value last written to head_keep_d_ (the arena starts it at 0)
     mutable bool head_screened_ = false;   // the last window's head was two-stage: only its top rows are exact
+    int32_t* head_from_d_ = nullptr;     // the window's first exact head row, copied from m_head_from_ (q6k_vhead's col_from)
     float *sh_gate_ = nullptr, *sh_up_ = nullptr, *sh_g_ = nullptr;
     float* hist_snap_ = nullptr;                              // T * NG_HIST * NG_HC_DIM
     float* ple_win_ = nullptr;   // 2 * T * NG_HC_DIM
