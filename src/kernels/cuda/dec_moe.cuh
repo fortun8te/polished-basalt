@@ -2229,9 +2229,13 @@ __device__ __forceinline__ void row_dot_20_sub4(const uint8_t* row, const block_
 // (row_dot_20_sub4) instead of 16 rows at 16 lanes, so each block keeps four times the rows' loads in flight behind one
 // plan read and one q8_1 staging; the 16-row blocks are bound by their per-block latency, not by DRAM.  Same bits.
 // No L2 prefetch before the wait: the blocks are resident early, and their prefetch competes with the gate/up launch.
+// FUSE: the SwiGLU pass is folded in (dm_swiglu_q8 per chunk from gate/up, the same values and q8_1 blocks the
+// separate pass wrote to hq), so hq is not read and the pass's launch and round trip are gone.
+template<bool FUSE>
 __device__ __forceinline__ void dm_down_q2_block(const unsigned long long* __restrict__ grp_ptr,
                                                  const int32_t* __restrict__ grp_start, int ng,
                                                  const int32_t* __restrict__ ent_dst, const block_q8_1* __restrict__ hq,
+                                                 const float* __restrict__ gate, const float* __restrict__ up,
                                                  const NativeExpertLayout& L, float* __restrict__ out, uint32_t* s_hq_buf,
                                                  int bx, int by, int gy, int tid) {
     const block_q8_1* s_hq = reinterpret_cast<const block_q8_1*>(s_hq_buf);
@@ -2243,9 +2247,13 @@ __device__ __forceinline__ void dm_down_q2_block(const unsigned long long* __res
         const int e0 = grp_start[g], e1 = grp_start[g + 1];
         for (int e = e0; e < e1; e += GRP_NC) {
             const int n = min(GRP_NC, e1 - e);
-            const uint32_t* src = reinterpret_cast<const uint32_t*>(hq + (size_t) e * 20);
             __syncthreads();
-            for (int i = tid; i < n * (20 * 9); i += 256) s_hq_buf[i] = src[i];
+            if (FUSE) {
+                dm_swiglu_q8(gate, up, e, e + n, (int) L.n_ff, reinterpret_cast<block_q8_1*>(s_hq_buf), tid);
+            } else {
+                const uint32_t* src = reinterpret_cast<const uint32_t*>(hq + (size_t) e * 20);
+                for (int i = tid; i < n * (20 * 9); i += 256) s_hq_buf[i] = src[i];
+            }
             __syncthreads();
             if (n == 1) {
                 const int off1[1] = { 0 };
@@ -2272,19 +2280,30 @@ __device__ __forceinline__ void dm_down_q2_block(const unsigned long long* __res
 }
 
 // at most 64 registers a thread: four blocks an SM
+template<bool FUSE>
 __global__ void __launch_bounds__(256, 4) dm_down_q2_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                          const int32_t* __restrict__ grp_start,
                                                          const int32_t* __restrict__ n_groups,
                                                          const int32_t* __restrict__ ent_dst,
-                                                         const block_q8_1* __restrict__ hq, NativeExpertLayout L,
-                                                         float* __restrict__ out) {
+                                                         const block_q8_1* __restrict__ hq,
+                                                         const float* __restrict__ gate, const float* __restrict__ up,
+                                                         NativeExpertLayout L, float* __restrict__ out) {
     const int ng = *n_groups;
     if ((int) blockIdx.y >= ng) return;
-    pdl_wait();
+    pdl_wait();   // FUSE: the gate/up grid (its SwiGLU inputs), else the SwiGLU grid
     pdl_launch_dependents();   // the tail wait may start polling the tiers once every block is past its wait
     __shared__ uint32_t s_hq_buf[GRP_NC * 20 * 9];
-    dm_down_q2_block(grp_ptr, grp_start, ng, ent_dst, hq, L, out, s_hq_buf, (int) blockIdx.x, (int) blockIdx.y,
-                     (int) gridDim.y, (int) threadIdx.x);
+    dm_down_q2_block<FUSE>(grp_ptr, grp_start, ng, ent_dst, hq, gate, up, L, out, s_hq_buf, (int) blockIdx.x,
+                           (int) blockIdx.y, (int) gridDim.y, (int) threadIdx.x);
+}
+
+// BASALT_FUSE_DM_SWIGLU=0 keeps the separate SwiGLU launch for the Q2_0 down
+static bool dm_fuse_swiglu() {
+    static const bool on = [] {
+        const char* e = std::getenv("BASALT_FUSE_DM_SWIGLU");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    return on;
 }
 
 bool dec_moe_glue_ok(const NativeExpertLayout& L) {
@@ -2335,13 +2354,22 @@ void dec_moe_glue(const NativeExpertLayout& L, const DmGlueArgs& a_in, void* scr
     check("dec_moe_glue/gu");
     const DmPlan* P = a.plan;
     const long long nh = (long long) cap * L.n_ff;
-    launch_dependent(swiglu_q8_1_entries_pdl_kernel, dim3((unsigned) ((nh + 255) / 256)), s, (const float*) gate,
-                     (const float*) up, (const int32_t*) P->start, (const int32_t*) P->counts, (int) L.n_ff, hq);
-    check("dec_moe_glue/swiglu");
+    const bool fuse = L.d_type == 42 && dm_fuse_swiglu();   // Q2_0 down folds the SwiGLU pass in
+    if (!fuse) {
+        launch_dependent(swiglu_q8_1_entries_pdl_kernel, dim3((unsigned) ((nh + 255) / 256)), s, (const float*) gate,
+                         (const float*) up, (const int32_t*) P->start, (const int32_t*) P->counts, (int) L.n_ff, hq);
+        check("dec_moe_glue/swiglu");
+    }
     if (L.d_type == 42) {   // Q2_0: 64-row blocks (n_ff == 640, dec_moe_glue_ok)
-        launch_dependent(dm_down_q2_kernel, dim3((unsigned) ((L.n_embd + 63) / 64), (unsigned) gy), s,
-                         (const unsigned long long*) P->ptr, (const int32_t*) P->start, (const int32_t*) P->counts,
-                         (const int32_t*) P->dst, (const block_q8_1*) hq, L, out);
+        const dim3 gdn((unsigned) ((L.n_embd + 63) / 64), (unsigned) gy);
+        if (fuse)
+            launch_dependent(dm_down_q2_kernel<true>, gdn, s, (const unsigned long long*) P->ptr,
+                             (const int32_t*) P->start, (const int32_t*) P->counts, (const int32_t*) P->dst,
+                             (const block_q8_1*) hq, (const float*) gate, (const float*) up, L, out);
+        else
+            launch_dependent(dm_down_q2_kernel<false>, gdn, s, (const unsigned long long*) P->ptr,
+                             (const int32_t*) P->start, (const int32_t*) P->counts, (const int32_t*) P->dst,
+                             (const block_q8_1*) hq, (const float*) gate, (const float*) up, L, out);
         check("dec_moe_glue/down");
         return;
     }
