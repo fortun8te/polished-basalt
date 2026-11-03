@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "common.hpp"
 
 namespace basalt::core {
@@ -93,11 +94,14 @@ bool MtpDrafter::draft_rows(int T, const int32_t* tokens, int64_t p, int a, int3
         decode_gaps().mark(7);
         run_launch_hook();
         prefetch_ple(tokens[a]);
+        // BASALT_GAP_OVERLAP=0 restores the 1024-spin stream poll; the default polls every 64 so a chain that ends
+        // early (the device stopped it) is noticed sooner and the next window launches sooner
+        static const uint32_t poll_mask = [] { const char* e = std::getenv("BASALT_GAP_OVERLAP"); return e && e[0] == '0' ? 1023u : 63u; }();
         auto wait_step = [&](int j) {
             uint32_t spins = 0;
             while (((volatile int32_t*) h_out_)[j] < 0) {
                 basalt::platform::cpu_relax();
-                if ((++spins & 1023u) == 0 && cudaStreamQuery(cs_) != cudaErrorNotReady) break;
+                if ((++spins & poll_mask) == 0 && cudaStreamQuery(cs_) != cudaErrorNotReady) break;
             }
         };
         wait_step(0);
