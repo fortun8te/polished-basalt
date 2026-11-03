@@ -522,8 +522,6 @@ private:
     }();   ///< greedy by default; per-request via set_sampling
     const int32_t* hist_d_ = nullptr;   // penalty-history row (set_history); null = no penalties apply
     int hist_len_ = 0;
-    int head_from_ = 0;
-    int32_t* h_head_from_ = nullptr; int32_t* m_head_from_ = nullptr;
     bool head_sampling_ = true;          ///< set_head_sampling
     int head_from_ = 0;                  ///< set_head_from, for the next window
     int32_t* h_head_from_ = nullptr; int32_t* m_head_from_ = nullptr;   ///< the window's first row the head scores exactly
@@ -738,7 +736,6 @@ private:
     SessionState* gs_ss_ = nullptr;
     float *gs_h_full_ = nullptr, *gs_h_slice_ = nullptr;   // pinned staging for gs_move: CUDA0's whole layers, the slice
     uint8_t* vhead_scratch_ = nullptr;   // the two-stage head's histogram and row list (q6k_vhead, q80p_vhead)
-    int32_t* head_from_d_ = nullptr;
     int32_t* head_keep_d_ = nullptr;     // q80p_vhead's list length, read by the captured head (null: no such head)
     int head_keep_set_ = 0;              // the value last written to head_keep_d_ (the arena starts it at 0)
     mutable bool head_screened_ = false;   // the last window's head was two-stage: only its top rows are exact
