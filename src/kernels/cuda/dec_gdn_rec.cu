@@ -79,16 +79,24 @@ __device__ __forceinline__ void stamp(const DecRecArgs& a, int i) {
     a.stamps[blockIdx.x * 10 + i] = t;
 }
 
-struct RecSmem {
-    float qn[kDecMaxT][S], kn[kDecMaxT][S];
-    float v[kDecMaxT][32];
-    float oc[kDecMaxT][32];
+// The shared state of one head block for windows of up to MT tokens.
+template<int MT>
+struct RecSmemT {
+    float qn[MT][S], kn[MT][S];
+    float v[MT][32];
+    float oc[MT][32];
     float red_kv[RG][32], red_o[RG][32];
-    float part[2][kDecMaxT][RG];   // the q/k L2 partials
-    float g[kDecMaxT], b[kDecMaxT];
-    float wsum[kDecMaxT][4];       // every rank's sum of squares per token, pushed by the ranks
-    uint4 wab[2][32 * NJ];         // the head's alpha and beta rows
+    float part[2][MT][RG];   // the q/k L2 partials
+    float g[MT], b[MT];
+    float wsum[MT][4];       // every rank's sum of squares per token, pushed by the ranks
+    uint4 wab[2][32 * NJ];   // the head's alpha and beta rows
 };
+using RecSmem = RecSmemT<kDecMaxT>;
+
+// The two-head kernels keep two heads' state in static shared memory (48 KB): they take windows of up to this many
+// tokens, wider ones the one-head kernels.
+constexpr int kRec2MaxT = 8;
+static_assert(2 * sizeof(RecSmemT<kRec2MaxT>) <= 48 * 1024, "rec2_kernel's two heads fit in static shared memory");
 
 // alpha (is_beta false) or beta of `head` for token t: gdn_ab_multi_unrolled_kernel's sum, one warp.  The row's
 // weights are in shared memory; the token's 80 activations per lane are loaded at once.
@@ -181,8 +189,8 @@ __device__ __forceinline__ void rec_bar(int hs) {
 
 // One block of a head's cluster.  `head` = the launch's value head (head_map), `rank` = its column group.  SPLIT: no cluster and no z; the
 // head's raw output goes to a.o for dec_gdn_rec_norm.
-template<int MAXT, bool SPLIT, bool SUB = false, bool PAIR = false>
-__device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, int rank, RecSmem& sm,
+template<int MAXT, bool SPLIT, bool SUB = false, bool PAIR = false, class SMEM = RecSmem>
+__device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, int rank, SMEM& sm,
                                           cg::cluster_group* cluster, int hs = 0) {
     const unsigned lt = PAIR ? threadIdx.x - (unsigned) (hs * S) : threadIdx.x;   // the thread's index in its head
     const int rg = lt / 32, lane = lt % 32, tid = lt;
@@ -332,9 +340,11 @@ __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, 
     // cluster barrier
     asm volatile("barrier.cluster.wait.aligned;" ::: "memory");
     if (rg == 0) {
-        const int t = lane / 4, r = lane % 4;
-        const float v = __shfl_sync(0xffffffffu, wsum_t, t);
-        if (t < T) *cluster->map_shared_rank(&sm.wsum[t][rank], r) = v;
+        for (int t0 = 0; t0 < T; t0 += 8) {   // eight tokens x four ranks a round
+            const int t = t0 + lane / 4, r = lane % 4;
+            const float v = __shfl_sync(0xffffffffu, wsum_t, t);
+            if (t < T) *cluster->map_shared_rank(&sm.wsum[t][rank], r) = v;
+        }
     }
     cluster->sync();
     stamp(a, 7);
@@ -387,7 +397,8 @@ __global__ void __cluster_dims__(4, 1, 1) __launch_bounds__(S) rec_seg_kernel(co
 // rec_kernel with two value heads per block: slot h of cluster c's block is head 2c + h, on threads [128 h, 128 h + 128)
 template<int MAXT>
 __global__ void __cluster_dims__(4, 1, 1) __launch_bounds__(2 * S, 2) rec2_kernel(const DecRecArgs a, int T) {
-    __shared__ RecSmem sm[2];
+    static_assert(MAXT <= kRec2MaxT, "the two-head kernel takes windows of up to kRec2MaxT tokens");
+    __shared__ RecSmemT<kRec2MaxT> sm[2];
     cg::cluster_group cl = cg::this_cluster();
     const int hs = threadIdx.x / S;
     rec_block<MAXT, false, false, true>(a, T, (blockIdx.x / 4) * 2 + hs, blockIdx.x % 4, sm[hs], &cl, hs);
@@ -398,8 +409,9 @@ template<int MAXT>
 __global__ void __cluster_dims__(4, 1, 1) __launch_bounds__(2 * S, 2) rec2_seg_kernel(const DecRecArgs a0, const SegRow* rows,
                                                                                     size_t state_off) {
     const SegRow r = rows[blockIdx.y];
+    static_assert(MAXT <= kRec2MaxT, "the two-head kernel takes windows of up to kRec2MaxT tokens");
     if (r.j != 0) return;
-    __shared__ RecSmem sm[2];
+    __shared__ RecSmemT<kRec2MaxT> sm[2];
     cg::cluster_group cl = cg::this_cluster();
     DecRecArgs a = a0;
     const size_t vd = (size_t) S * a.h_v, r0 = (size_t) r.row0;
@@ -455,15 +467,16 @@ void dec_gdn_rec(const DecRecArgs& a, int n_tok, void* stream) {
         std::exit(1);
     }
     const cudaStream_t s = (cudaStream_t) stream;
-    if (rec_pair_on() && mapped_heads(a) % 2 == 0) {
+    if (rec_pair_on() && mapped_heads(a) % 2 == 0 && n_tok <= kRec2MaxT) {
         const dim3 grid((unsigned) (mapped_heads(a) / 2 * 4)), block(2 * S);
         if (n_tok <= 2) launch_pdl(rec2_kernel<2>, grid, block, 0, s, a, n_tok);
         else if (n_tok <= 4) launch_pdl(rec2_kernel<4>, grid, block, 0, s, a, n_tok);
-        else launch_pdl(rec2_kernel<kDecMaxT>, grid, block, 0, s, a, n_tok);
+        else launch_pdl(rec2_kernel<kRec2MaxT>, grid, block, 0, s, a, n_tok);
     } else {
         const dim3 grid((unsigned) (mapped_heads(a) * 4)), block(S);
         if (n_tok <= 2) launch_pdl(rec_kernel<2>, grid, block, 0, s, a, n_tok);
         else if (n_tok <= 4) launch_pdl(rec_kernel<4>, grid, block, 0, s, a, n_tok);
+        else if (n_tok <= 8) launch_pdl(rec_kernel<8>, grid, block, 0, s, a, n_tok);
         else launch_pdl(rec_kernel<kDecMaxT>, grid, block, 0, s, a, n_tok);
     }
     const cudaError_t e = cudaGetLastError();
@@ -477,15 +490,16 @@ void dec_gdn_rec_seg(const DecRecArgs& a, const SegRow* rows, size_t state_off, 
         std::exit(1);
     }
     const cudaStream_t s = (cudaStream_t) stream;
-    if (rec_pair_on() && a.h_v % 2 == 0) {
+    if (rec_pair_on() && a.h_v % 2 == 0 && max_n <= kRec2MaxT) {
         const dim3 grid((unsigned) (a.h_v / 2 * 4), (unsigned) n_rows), block(2 * S);
         if (max_n <= 2) launch_pdl(rec2_seg_kernel<2>, grid, block, 0, s, a, rows, state_off);
         else if (max_n <= 4) launch_pdl(rec2_seg_kernel<4>, grid, block, 0, s, a, rows, state_off);
-        else launch_pdl(rec2_seg_kernel<kDecMaxT>, grid, block, 0, s, a, rows, state_off);
+        else launch_pdl(rec2_seg_kernel<kRec2MaxT>, grid, block, 0, s, a, rows, state_off);
     } else {
         const dim3 grid((unsigned) (a.h_v * 4), (unsigned) n_rows), block(S);
         if (max_n <= 2) launch_pdl(rec_seg_kernel<2>, grid, block, 0, s, a, rows, state_off);
         else if (max_n <= 4) launch_pdl(rec_seg_kernel<4>, grid, block, 0, s, a, rows, state_off);
+        else if (max_n <= 8) launch_pdl(rec_seg_kernel<8>, grid, block, 0, s, a, rows, state_off);
         else launch_pdl(rec_seg_kernel<kDecMaxT>, grid, block, 0, s, a, rows, state_off);
     }
     const cudaError_t e = cudaGetLastError();
@@ -502,6 +516,7 @@ void dec_gdn_rec_split(const DecRecArgs& a, int n_tok, void* stream) {
     const cudaStream_t s = (cudaStream_t) stream;
     if (n_tok <= 2) launch_pdl(rec_split_kernel<2>, grid, block, 0, s, a, n_tok);
     else if (n_tok <= 4) launch_pdl(rec_split_kernel<4>, grid, block, 0, s, a, n_tok);
+    else if (n_tok <= 8) launch_pdl(rec_split_kernel<8>, grid, block, 0, s, a, n_tok);
     else launch_pdl(rec_split_kernel<kDecMaxT>, grid, block, 0, s, a, n_tok);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "dec_gdn_rec_split: %s", cudaGetErrorString(e)); std::exit(1); }
