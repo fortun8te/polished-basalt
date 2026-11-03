@@ -201,7 +201,8 @@ void ple_block_projected(const float* projected_key, const float* projected_valu
 }
 
 void ple_key_rows(const float* emb, int T, const PleWeights& w, float* key, void* q8_1, void* stream) {
-    if (!emb || !key || !stream || T < 1 || T > 8) throw std::invalid_argument("ple_key_rows: null input or rows outside 1..8");
+    if (!emb || !key || !stream || T < 1 || T > kNativeMaxCols)
+        throw std::invalid_argument("ple_key_rows: null input or rows outside 1..16");
     if (w.key_bf16 != nullptr) {
         bf16_gemv_fp32_mmvf_multi(emb, NG_N_EMBD, w.key_bf16, key, NG_HC_DIM, NG_N_EMBD, NG_HC_DIM, T, stream);
         return;

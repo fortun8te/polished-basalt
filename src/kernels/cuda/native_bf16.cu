@@ -138,6 +138,12 @@ int mmvf_block_size(int64_t n_in) {
 
 void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy,
                                int64_t n_in, int64_t n_out, int n_tok, void* stream) {
+    if (n_tok > 8 && n_tok <= kBf16MaxRows && (ldx & 1) == 0) {   // 8 rows a launch; each row is bitwise its own call
+        for (int t0 = 0; t0 < n_tok; t0 += 8)
+            bf16_gemv_fp32_mmvf_multi(x + (size_t) t0 * ldx, ldx, w, y + (size_t) t0 * ldy, ldy, n_in, n_out,
+                                      n_tok - t0 < 8 ? n_tok - t0 : 8, stream);
+        return;
+    }
     if (n_tok == 1 && ldy >= n_out) { bf16_gemv_fp32_mmvf(x, w, y, n_in, n_out, stream); return; }
     if (n_tok < 1 || n_tok > 8 || n_in <= 0 || (n_in & 1) != 0 || n_out <= 0 || (ldx & 1) != 0 || x == nullptr ||
         w == nullptr || y == nullptr || (reinterpret_cast<uintptr_t>(x) & 7u) != 0)

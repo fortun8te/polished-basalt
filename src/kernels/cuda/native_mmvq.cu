@@ -1511,6 +1511,13 @@ void validate_shape(int n_in, int ncols, int block_elems = Q8K) {
     }
     if (ncols < 1 || ncols > MAX_NCOLS) throw std::invalid_argument("native MMVQ requires 1 <= ncols <= 8");
 }
+// the quantizers take any column count up to the verify window: the columns are one contiguous vector
+void validate_shape_wide(int n_in, int ncols) {
+    if (n_in <= 0 || n_in % Q8K != 0) {
+        throw std::invalid_argument("native MMVQ requires n_in > 0 and divisible by its block element count");
+    }
+    if (ncols < 1 || ncols > kNativeMaxCols) throw std::invalid_argument("native MMVQ requires 1 <= ncols <= 16");
+}
 void validate_pointer(const void* p) {
     if (!p || reinterpret_cast<std::uintptr_t>(p) % 4 != 0) {
         throw std::invalid_argument("native MMVQ requires non-null 4-byte aligned device pointers");
@@ -1585,12 +1592,12 @@ bool native_mmvq_mma_available() { return mmvq_mma_sms() > 0; }
 long native_mmvq_mma_launches() { return g_mmvq_mma_launches.load(std::memory_order_relaxed); }
 
 std::size_t native_q8_1_bytes(int n_in, int ncols) {
-    validate_shape(n_in, ncols);
+    validate_shape_wide(n_in, ncols);
     return std::size_t(ncols) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
 }
 
 void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols, void* stream) {
-    validate_shape(n_in, ncols);
+    validate_shape_wide(n_in, ncols);
     validate_pointer(x);
     validate_pointer(x_q8_1);
     validate_stream(stream);
@@ -1605,7 +1612,7 @@ void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols, voi
 
 void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_1,
                                  int n_in, int ncols, void* stream) {
-    validate_shape(n_in, ncols);
+    validate_shape_wide(n_in, ncols);
     validate_pointer(gate);
     validate_pointer(up);
     validate_pointer(x_q8_1);
@@ -1974,8 +1981,8 @@ std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out) {
     return row_bytes * std::size_t(n_out);
 }
 
-void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
-                 int n_in, int n_out, int ncols, void* stream) {
+static void native_mmvq_chunk(int ggml_type, const void* weights, const void* x_q8_1, float* y,
+                              int n_in, int n_out, int ncols, void* stream) {
     switch (ggml_type) {
     case 2: native_q4_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 6: native_q5_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
@@ -1992,6 +1999,18 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
         iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     default: throw std::invalid_argument("unsupported native MMVQ GGML type");
     }
+}
+
+void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
+                 int n_in, int n_out, int ncols, void* stream) {
+    if (ncols < 1 || ncols > kNativeMaxCols) throw std::invalid_argument("native MMVQ requires 1 <= ncols <= 16");
+    // Columns past the kernels' width take further launches over the next columns; with the exact multi-column layout
+    // (the default) a column's value does not depend on the other columns, so each is what its own launch gives.
+    const std::size_t xcol = std::size_t(n_in / Q8K) * sizeof(Q81Block);
+    for (int c0 = 0; c0 < ncols; c0 += MAX_NCOLS)
+        native_mmvq_chunk(ggml_type, weights, static_cast<const char*>(x_q8_1) + std::size_t(c0) * xcol,
+                          y + std::size_t(c0) * std::size_t(n_out), n_in, n_out,
+                          ncols - c0 < MAX_NCOLS ? ncols - c0 : MAX_NCOLS, stream);
 }
 
 

@@ -103,8 +103,8 @@ constexpr bool fused_swiglu_q81_enabled() { return true; }
 void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& nw,
                          const uint16_t* gate_inp_bf16, float* gate, float* up, float* g, float* out, int64_t n_embd,
                          int64_t n_ff, void* stream) {
-    if (n_tok < 1 || n_tok > 8 || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream)
-        throw std::invalid_argument("shared_expert_multi: needs 1..8 tokens, native weights, scratch and a stream");
+    if (n_tok < 1 || n_tok > kNativeMaxCols || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream)
+        throw std::invalid_argument("shared_expert_multi: needs 1..16 tokens, native weights, scratch and a stream");
     cudaStream_t cs = (cudaStream_t) stream;
     native_quantize_q8_1(x, nw.q8_1, (int) n_embd, n_tok, stream);
     const void* x_q8_1 = nw.q8_1;
@@ -127,9 +127,9 @@ void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& n
 
 void shared_expert_multi_rows(int n_tok, const NativeSharedWeights& nw, float* gate, float* up, float* out,
                               int64_t n_embd, int64_t n_ff, void* stream, void* stream2, void* join) {
-    if (n_tok < 1 || n_tok > 8 || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream ||
+    if (n_tok < 1 || n_tok > kNativeMaxCols || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream ||
         (stream2 != nullptr && join == nullptr))
-        throw std::invalid_argument("shared_expert_multi_rows: needs 1..8 tokens, native weights, rows and a stream");
+        throw std::invalid_argument("shared_expert_multi_rows: needs 1..16 tokens, native weights, rows and a stream");
     cudaStream_t cs = (cudaStream_t) stream;
     native_mmvq(nw.gate_type, nw.gate_data, nw.q8_1, gate, (int) n_embd, (int) n_ff, n_tok, stream);
     if (stream2 != nullptr) {
