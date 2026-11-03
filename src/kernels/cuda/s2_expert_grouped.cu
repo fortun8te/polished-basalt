@@ -636,10 +636,13 @@ namespace {
 // arithmetic is `row_dot_s2_q8`'s, chunk by chunk in the same lane order, so every entry is bitwise the per-entry
 // hit kernel's.
 constexpr int GU_CHUNKS = (H / 32 + 31) / 32;   // 3: chunks of a gate/up row per lane (80 chunks / 32 lanes)
-constexpr int GMAX = 8;                          // entries per group (tokens routed to one expert in a window)
+constexpr int GMAX = kVerifyMaxT;                // entries per group (tokens routed to one expert in a window)
 // a group holds one entry per token of the window routed to its expert, and the kernels below keep at
 // most GMAX of them (`min(..., GMAX)`): a longer window would drop entries without a word.
 static_assert(GMAX >= kVerifyMaxT, "a verify window's group can exceed GMAX entries");
+// the static shared memory of the grouped kernels at GMAX = 12 (per entry: 2560 B of words + 320 B of scales / 2560 B + 320 B)
+static_assert(GMAX * (H / 4 * 4 + H / 32 * 4) <= 40 * 1024, "gu_grouped_kernel's staged activations fit static shared memory");
+static_assert(8 * GMAX * (H / 32) * 4 + GMAX * (H / 32) * 8 <= 48 * 1024, "gu_grouped_t_kernel's staged activations fit static shared memory");
 constexpr int GU_ROWS = 32;                      // gate/up rows per block: 4 per warp
 constexpr int D_ROWS = 64;                       // down rows per block: 8 per warp
 

@@ -16,7 +16,7 @@ namespace basalt::core {
 namespace {
 constexpr int64_t H = basalt::kernels::cpu::H;
 constexpr int64_t FF = basalt::kernels::cpu::FF;
-constexpr int64_t CAP = basalt::kernels::cpu::MAXT * 10;
+constexpr int64_t CAP = basalt::kernels::cpu::kWinT * 10;
 
 // Small enough to copy as one pinned buffer per layer. The kernels read the
 // individual arrays through pointers into the same device allocation.
@@ -246,7 +246,7 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     struct Timer { double& acc; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
         ~Timer() { acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); } } timer{ms_begin_};
     const int64_t n = n_tok * k;
-    if (n <= 0 || n > CAP || n_tok > basalt::kernels::cpu::MAXT || k != 10 || layer < 0 ||
+    if (n <= 0 || n > CAP || n_tok > basalt::kernels::cpu::kWinT || k != 10 || layer < 0 ||
         (size_t) layer >= layers_present_.size() || device_ < 0) {
         err = "CUDA" + std::to_string(device_) + " experts: invalid layer, routing width or window size";
         return false;

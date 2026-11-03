@@ -2189,14 +2189,14 @@ namespace {
 // are fixed arrays of this many entries: MAXT tokens of the model's 10 routed experts must fit, and a larger k is
 // refused at run time rather than written past them.
 constexpr int64_t kMaxWindowEntries = 128;
-static_assert(basalt::kernels::cpu::MAXT * 10 <= kMaxWindowEntries, "a verify window's entries overflow the tables");
+static_assert(basalt::kernels::cpu::kWinT * 10 <= kMaxWindowEntries, "a verify window's entries overflow the tables");
 }  // namespace
 
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out) {
     using namespace basalt::kernels::cpu;
     if (d.failed) return;
-    if (n_tok < 1 || n_tok > MAXT) {
+    if (n_tok < 1 || n_tok > kWinT) {   // the row kernels take MAXT tokens of one expert a job; the jobs below split a wider group
         d.failed = true;
         d.fail = "a verify window has more tokens than the multi-token expert kernel takes";
         d.fail_layer = d.layers;
@@ -2208,12 +2208,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         d.fail_layer = d.layers;
         return;
     }
-    if ((int64_t) d.act_multi.size() < n_tok) d.act_multi.resize((size_t) MAXT);
+    if ((int64_t) d.act_multi.size() < n_tok) d.act_multi.resize((size_t) kWinT);
     const ExpertLayout& lay = expert_layout();
     const bool native = lay.native;
-    if (native && d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
+    if (native && d.nact_multi.size() < (size_t) kWinT * kNativeActBytes) d.nact_multi.resize((size_t) kWinT * kNativeActBytes);
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
-    if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
+    if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (kWinT * k));
     const auto c0 = std::chrono::steady_clock::now();
     // ---- the GPU's share, decided and published FIRST so the GPU starts while the CPU works.  Distinct experts in
     // routing order; resident ones and the last pcie_num/256 of the missed ones go to the GPU.
@@ -2393,6 +2393,9 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             }
             ++d.cache_refused;
             int16_t& jo = d.job_of[(size_t) e];
+            // a job carries at most MAXT tokens of one expert (each token is bitwise its own single-token run, so a
+            // wider group is simply a second job on the same blob): 9..12 tokens routed to one expert open another
+            if (jo >= 0 && d.jobs_multi[(size_t) jo].nt >= MAXT) jo = -1;
             if (jo < 0) {
                 const uint8_t* b = d.src->blob(d.layers, e);
                 if (b == nullptr) {

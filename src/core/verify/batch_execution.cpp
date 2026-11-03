@@ -113,8 +113,8 @@ bool Verifier::stage_batch(const int* slots, const int* lens, int S, int hbase, 
 
 bool Verifier::run_slots(int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool, void* user, int32_t* out,
                          std::string& err) {
-    int rows[8] = {};
-    for (int t = 0; t < S && t < 8; ++t) rows[t] = t;
+    int rows[basalt::kernels::kVerifyMaxT] = {};
+    for (int t = 0; t < S && t < basalt::kernels::kVerifyMaxT; ++t) rows[t] = t;
     return run_slot_rows(rows, S, tokens, pos, pool, user, out, err);
 }
 
@@ -315,8 +315,8 @@ bool Verifier::sample_rows(int S, std::string& err) {
 bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err) {
     const OnDevice on_device(device_);
     if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
-    int rows[8] = {};
-    for (int t = 0; t < S && t < 8; ++t) rows[t] = base + t;
+    int rows[basalt::kernels::kVerifyMaxT] = {};
+    for (int t = 0; t < S && t < basalt::kernels::kVerifyMaxT; ++t) rows[t] = base + t;
     if (gs_live_ && !gs_move(false, err)) return false;
     gs_split_ = false;
     if (!stage_batch(rows, nullptr, S, base, tokens, pos, err)) return false;

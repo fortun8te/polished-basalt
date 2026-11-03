@@ -13,7 +13,7 @@
 
 namespace basalt::kernels {
 
-constexpr int kDecMaxT = 8;
+constexpr int kDecMaxT = 12;   // dec_gdn_rec: windows of 9..12 tokens use the kDecMaxT launch tier; 1..8 keep their tiers
 
 struct DecRecArgs {
     const float* state = nullptr;    // [S rows][h_v][S cols] fp32, then the conv history [C][3]

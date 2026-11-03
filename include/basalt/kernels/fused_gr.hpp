@@ -41,11 +41,12 @@ struct FusedGrArgs {
 bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr);
 void fused_gr_read(const FusedGrArgs& a, void* stream);
 
-/// Plan v0.3 P6: the same read for up to 8 tokens that share the weights (a verify window): the weights are read
+/// Plan v0.3 P6: the same read for up to kFusedGrMaxT tokens that share the weights (a verify window): the weights are read
 /// once for all of them.  `a[t]` is token t's arguments (its own R, pending write, lo, rs, inject, mixed; the four
 /// weight pointers and eps must be the same for every t); `xn_scratch` is n_tok * hc * n_embd floats.  Every
 /// token's outputs are bitwise `fused_gr_read(a[t])`.
-constexpr int kFusedGrMaxT = 8;
+constexpr int kFusedGrMaxT = 12;   ///< callers' array bound; the kernels take 8 tokens a launch (kFusedGrKernelT) and a wider read runs in passes of 8
+constexpr int kFusedGrKernelT = 8;
 void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
                          unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
 

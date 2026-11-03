@@ -22,7 +22,7 @@
 namespace basalt::kernels {
 namespace {
 
-constexpr int MT = kFusedGrMaxT;
+constexpr int MT = kFusedGrKernelT;
 constexpr int MAX_HC = 4;
 constexpr int MAX_LR = 512;
 constexpr int G8 = 32;

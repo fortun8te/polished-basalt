@@ -11,7 +11,7 @@
 namespace basalt::core {
 namespace {
 constexpr int64_t H = basalt::kernels::cpu::H;
-constexpr int K = 10, MAXT = basalt::kernels::cpu::MAXT, CAP = MAXT * K;
+constexpr int K = 10, MAXT = basalt::kernels::cpu::kWinT, CAP = MAXT * K;
 struct ReduceMeta { int32_t row[CAP]; float weight[CAP]; };
 
 bool check(cudaError_t status, std::string& err) {

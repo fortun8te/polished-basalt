@@ -1141,11 +1141,17 @@ void gdn_ab_multi(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
         else if (n_tok <= 6)
             launch_pdl(gdn_ab_multi_unrolled_kernel<6, 10>, dim3(blocks), dim3(64), 0, (cudaStream_t) stream,
                        x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
+        else if (n_tok <= 8)   // windows of up to 8 rows keep the 8-row launch
+            launch_pdl(gdn_ab_multi_unrolled_kernel<8, 10>, dim3(blocks), dim3(64), 0, (cudaStream_t) stream,
+                       x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
         else
             launch_pdl(gdn_ab_multi_unrolled_kernel<kVerifyMaxT, 10>, dim3(blocks), dim3(64), 0, (cudaStream_t) stream,
                        x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
     } else if (n_tok <= 4) {
         launch_pdl(gdn_ab_multi_kernel<4>, dim3(blocks), dim3(64), 0, (cudaStream_t) stream,
+                   x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
+    } else if (n_tok <= 8) {
+        launch_pdl(gdn_ab_multi_kernel<8>, dim3(blocks), dim3(64), 0, (cudaStream_t) stream,
                    x, w_alpha, w_beta, dt, ssm_a, gate, beta, n_embd, h_v, n_tok);
     } else {
         launch_pdl(gdn_ab_multi_kernel<kVerifyMaxT>, dim3(blocks), dim3(64), 0, (cudaStream_t) stream,

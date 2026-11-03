@@ -11,7 +11,7 @@ namespace {
 // The shape of a round's cost by window size, relative to one token, used only for sizes not measured yet (the
 // measured round times replace it). It sits between the measured curves: steeper with every missed expert
 // on the CPU, flatter with the default CPU/DMA split.
-constexpr double kShape[DraftPolicy::kMaxT + 1] = {0.0, 1.0, 1.35, 1.7, 2.05, 2.45, 2.85, 3.25, 3.6};
+constexpr double kShape[DraftPolicy::kMaxT + 1] = {0.0, 1.0, 1.35, 1.7, 2.05, 2.45, 2.85, 3.25, 3.6, 3.9, 4.2, 4.5, 4.8};
 constexpr double kCostAlpha = 0.1;    // EMA weight of a new round time
 constexpr double kTokAlpha = 0.05;    // EMA weight of a new MTP window outcome
 constexpr double kDecay = 0.97;       // lookup counts: older windows fade

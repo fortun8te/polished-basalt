@@ -26,7 +26,7 @@ namespace basalt::spec {
 
 class DraftPolicy {
 public:
-    static constexpr int kMaxT = 8;
+    static constexpr int kMaxT = 12;   // = kVerifyMaxT; the window actually run is bounded by --verify-max-rows
     static constexpr int kBuckets = 4;
 
     explicit DraftPolicy(int max_t, double margin = 0.03);

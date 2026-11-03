@@ -470,10 +470,10 @@ private:
     /// slots the rows are is data (the staged segment tables), so a membership change re-records nothing.
     std::map<uint64_t, cudaGraphExec_t> exec_bm_;
     std::map<int, cudaGraphExec_t> commit_bm_;
-    int last_rows_[8] = {};                ///< the slot of each row of the last batch window
+    int last_rows_[basalt::kernels::kVerifyMaxT] = {};                ///< the slot of each row of the last batch window
     const int32_t* bh_d_ = nullptr;        ///< set_batch_history
     int bh_len_ = 0;
-    int last_nseg_ = 0, last_seg_slot_[8] = {}, last_seg_len_[8] = {};   ///< its segments
+    int last_nseg_ = 0, last_seg_slot_[basalt::kernels::kVerifyMaxT] = {}, last_seg_len_[basalt::kernels::kVerifyMaxT] = {};   ///< its segments
     std::chrono::steady_clock::time_point commit_t0_;   ///< commit_slots_begin
     std::vector<int> commit_next_keep_;                 ///< its counts, for the next stage
     uint64_t bkey(int S, int hbase) const {
@@ -486,7 +486,7 @@ private:
     bool b_running_ = false;
     int64_t b_k_ = 0, b_steps_ = 0;
     std::chrono::steady_clock::time_point b_last_;
-    int32_t b_out_[8] = {};
+    int32_t b_out_[basalt::kernels::kVerifyMaxT] = {};
     std::vector<basalt::kernels::SamplerParams> slot_sp_;
     bool sample_rows(int S, std::string& err);   ///< the sampled slots' rows of the last batch window
     int32_t* h_commitb_ = nullptr; int32_t* m_commitb_ = nullptr;   // per slot [1, 0, pos, -1 ..], stride 2 + max_t
@@ -506,7 +506,7 @@ private:
     float* ple_work_ = nullptr;            ///< each row's PLE history while the window runs
     bool batch_dm_ = false;                ///< a batch window runs the device-planned tail
     void* arena_b_ = nullptr;
-    int64_t last_pos_b_[8] = {};
+    int64_t last_pos_b_[basalt::kernels::kVerifyMaxT] = {};
     bool capture_batch(int R, int hbase, std::string& err);
     void collect_profile();   // --profile: add the last window's stamps to prof_sum_
     bool capture_commit_batch(int R, std::string& err);
@@ -565,7 +565,7 @@ private:
     int max_t_ = 0;
     int last_t_ = 0;
     int64_t last_pos0_ = 0;
-    int32_t last_tokens_[8] = {};
+    int32_t last_tokens_[basalt::kernels::kVerifyMaxT] = {};
     int64_t n_vocab_ = 0;
     cudaStream_t cs_ = nullptr;
     cudaStream_t sh_cs_ = nullptr;

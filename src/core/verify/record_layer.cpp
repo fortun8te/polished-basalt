@@ -231,7 +231,10 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
     // the read writes the q8_1 rows, post's gate/up launch plans CUDA0's share
     glue_on = false;
     staged = false;
-    if (pk_ring && v_.dm_->ptab0 != nullptr && dec_hc && router_multi && hc_fused_q8_rows_ok()) {
+    // (the glue ring is released by ONE read's progress counters: a window of more than 8 tokens runs the read as two
+    // launches (hc_fused_read), so it takes the ring beside / the plain route instead)
+    if (pk_ring && v_.dm_->ptab0 != nullptr && dec_hc && router_multi && hc_fused_q8_rows_ok() &&
+        n <= basalt::kernels::kVerifyBaseT) {
         const auto& f = basalt::kernels::cpu::expert_layout().fmt[(size_t) l];
         glue_on = v_.dm_->vram < 0 && dec_moe_glue_ok(native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff));
         if (!glue_on) note_fallback("glue off for the layer's experts", f.gu_type, f.d_type);

@@ -1488,7 +1488,9 @@ bool cn_maps(const HcFusedArgs& h, CUtensorMap* tm) {
 }
 
 
-void hc_fused_read(const HcFusedArgs& a, void* stream) {
+namespace {
+// One kernel launch: a.T <= MAXT (8) tokens.  A wider window is split by hc_fused_read below.
+void hc_fused_read_pass(const HcFusedArgs& a, void* stream) {
     const DevInfo& d = dev_info();
     if (!d.ok || a.T < 1 || a.T > MAXT || !a.R || !a.R_out || !a.w_norm || !a.w_down || !a.w_up || !a.lo || !a.rs ||
         !a.mixed || !a.xn || (a.w_inject && !a.inject_out) || (a.apply && (!a.bo_prev || !a.inj_prev)) ||
@@ -1547,6 +1549,53 @@ void hc_fused_read(const HcFusedArgs& a, void* stream) {
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "hc_fused_read: %s", cudaGetErrorString(e));
         std::exit(1);
+    }
+}
+
+}  // namespace
+
+// A window of 9..12 tokens runs as two reads: tokens 0..7 exactly as the 8-token window does today (same kernel, same
+// arguments, so rows 1..8 keep every bit and the same reduction order), then tokens 8..T-1 as a read of their own.  The
+// kernel's per-token outputs do not depend on the window width or the token's column (hc_fused.hpp), so splitting is
+// exact; only the shared-memory budget (SMEM, one mma column a token, 8 columns) is why one launch stops at MAXT.
+// Every per-token pointer moves by the first token's offset in its [T][...] layout; the prefetches and the
+// early-release of the next kernel belong to the LAST pass (the one the following kernels wait on).  pub_ctr (the
+// peer ring's progress counters) counts one read's items, so it is refused for a split window.
+void hc_fused_read(const HcFusedArgs& a, void* stream) {
+    if (a.T <= MAXT) {
+        hc_fused_read_pass(a, stream);
+        return;
+    }
+    if (a.T > 12 || a.pub_ctr != nullptr) {
+        basalt::log::error("basalt", "hc_fused_read: a window of %d tokens%s is not supported", a.T,
+                           a.pub_ctr != nullptr ? " with pub_ctr" : "");
+        std::exit(1);
+    }
+    for (int t0 = 0; t0 < a.T; t0 += MAXT) {
+        HcFusedArgs b = a;
+        const bool last = t0 + MAXT >= a.T;
+        b.T = std::min(MAXT, a.T - t0);
+        const size_t o = (size_t) t0;
+        b.R = a.R + o * D;
+        b.R_out = a.R_out + o * D;
+        if (a.bo_prev) b.bo_prev = a.bo_prev + o * N;
+        if (a.inj_prev) b.inj_prev = a.inj_prev + o * HC;
+        b.lo = a.lo + o * LR;
+        b.rs = a.rs + o * HC;
+        if (a.inject_out) b.inject_out = a.inject_out + o * HC;
+        b.mixed = a.mixed + o * N;
+        b.xn = a.xn + o * D;
+        if (a.logits) b.logits = a.logits + o * NE;
+        if (a.ids) b.ids = a.ids + o * KT;
+        if (a.weights) b.weights = a.weights + o * KT;
+        if (a.xq) b.xq = static_cast<char*>(a.xq) + o * (N / 32) * sizeof(HcQ81);
+        if (a.gate_sh) b.gate_sh = a.gate_sh + o;
+        if (a.xq_sh) b.xq_sh = static_cast<char*>(a.xq_sh) + o * (N / 32) * sizeof(HcQ81);
+        if (!last) {
+            b.next_early = false;
+            for (int r = 0; r < 4; ++r) { b.pf[r] = nullptr; b.pf_bytes[r] = 0; }
+        }
+        hc_fused_read_pass(b, stream);
     }
 }
 

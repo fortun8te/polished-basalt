@@ -20,7 +20,16 @@
 
 namespace basalt::kernels {
 
-inline constexpr int kVerifyMaxT = 8;
+/// The verify window's compile-time capacity (rows).  The window actually run is bounded by the runtime limit
+/// `verify_max_rows()` (default kVerifyMaxT; `--verify-max-rows 8` restores the 8-row engine).  Rows 1..kVerifyBaseT
+/// run exactly the 8-row engine's launches and reduction orders.
+inline constexpr int kVerifyMaxT = 12;
+inline constexpr int kVerifyBaseT = 8;   ///< the kernels that were written for 8 rows keep that width; wider windows run them in passes of 8
+
+/// The runtime cap on a verify window's rows, 2..kVerifyMaxT (set by --verify-max-rows / BASALT_VERIFY_MAX_ROWS before
+/// the verifier is created).  Out-of-range values are clamped.
+int verify_max_rows();
+void set_verify_max_rows(int rows);
 
 /// For token t of T: conv over [history(3) | qkv_0 .. qkv_t] -> SiLU -> L2 norm of the q/k heads -> h[t].
 /// `history` is NOT written.  Bitwise `fused_gdn_conv_l2` per token.

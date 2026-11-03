@@ -108,6 +108,7 @@ std::optional<int> parse_options(int argc, char** argv, Options& o, std::string&
         else if (a == "--prefill-until") o.prefill_until = std::atoll(next("--prefill-until"));
         else if (a == "--dump-final-r") o.dump_final_r = next("--dump-final-r");
         else if (a == "--spec") { o.spec = std::atoi(next("--spec")); o.spec_given = true; }
+        else if (a == "--verify-max-rows") o.verify_max_rows = std::atoi(next("--verify-max-rows"));
         else if (a == "--batch") o.batch = std::atoi(next("--batch"));
         else if (a == "--slots") o.batch = std::atoi(next("--slots"));   // the same as --batch
         else if (a == "--spec-oracle") o.spec_oracle = next("--spec-oracle");

@@ -79,7 +79,7 @@ bool Runtime::batch_step() {
         // prompt-lookup run the policy prefers); the rows beyond the budget go to the slots whose last kept draft is the
         // least likely to be accepted
         int Tw[MR] = {};
-        float val[MR][8] = {};
+        float val[MR][MR] = {};
         for (int sg = 0; sg < S; ++sg) {
             BSlot& sl = bs[(size_t) rows[sg]];
             int T = 1;
@@ -99,7 +99,7 @@ bool Runtime::batch_step() {
             Tw[sg] = T;
             float c = 1.0f;
             const double q = sl.from_sfx ? bpolicy->lookup_rate(sl.smatch) : 0.0;
-            for (int j = 0; j + 1 < 8; ++j) {   // val[j]: the chance drafts 0..j are all accepted
+            for (int j = 0; j + 1 < MR; ++j) {   // val[j]: the chance drafts 0..j are all accepted
                 c *= sl.from_sfx ? (float) q : basalt::core::draft_cum_acc(sl.dprob[j]);
                 val[sg][j] = c;
             }

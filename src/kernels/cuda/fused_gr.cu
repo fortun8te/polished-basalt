@@ -11,6 +11,7 @@
 #include <mutex>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <random>
 #include <string>
@@ -142,7 +143,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_kernel(FusedGrArgs a) {
 
 // ================================ T tokens, one weight read ================================
 struct GrMulti {
-    FusedGrArgs a[kFusedGrMaxT];
+    FusedGrArgs a[kFusedGrKernelT];
     float* xn;
     int T;
 };
@@ -199,7 +200,7 @@ __global__ void __launch_bounds__(THREADS) gr_norm_multi_kernel(GrMulti m) {
 // shared-memory opt-in is below 8 * 2560 * 4 B slice the tokens and run TILEV 1280 instead,
 // which fits all eight tokens in one 40 KiB launch and stages 160 chunks of 8 (5 per lane, half the registers held
 // for the weight prefetch); smaller tiles raise how many blocks share an SM.
-template <int TILEV, int MAX_T = kFusedGrMaxT>
+template <int TILEV, int MAX_T = kFusedGrKernelT>
 __global__ void __launch_bounds__(THREADS) gr_down_multi_kernel(GrMulti m) {
     pdl_wait();
     constexpr int TQ = TILEV / 8 / 32;      // uint4 weight chunks per lane per tile
@@ -261,8 +262,8 @@ constexpr int UPM_BLOCKS = N / UPM_COLS;          // 160
 // sum, and lane k runs token k's epilogue - the T epilogues in parallel instead of one after another.
 __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
     pdl_wait();
-    __shared__ __align__(16) float lo[kFusedGrMaxT][LR];
-    __shared__ float g[kFusedGrMaxT][HC][UPM_COLS];
+    __shared__ __align__(16) float lo[kFusedGrKernelT][LR];
+    __shared__ float g[kFusedGrKernelT][HC][UPM_COLS];
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     const int T = m.T;
     const int d0 = blockIdx.x * UPM_COLS;
@@ -286,7 +287,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
         }
         float mine = 0.0f;
 #pragma unroll
-        for (int k = 0; k < kFusedGrMaxT; ++k) {
+        for (int k = 0; k < kFusedGrKernelT; ++k) {
             if (k >= T) break;
             float acc = dot8(wa, lo[k] + lane * 8);
             if (lane < LR / 8 - 32) acc += dot8(wb, lo[k] + (32 + lane) * 8);
@@ -415,7 +416,7 @@ __device__ __forceinline__ void stage_htile(const GrMulti& m, int T, int h, floa
     }
 }
 
-template <int MAX_T = kFusedGrMaxT>
+template <int MAX_T = kFusedGrKernelT>
 __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
     extern __shared__ __align__(16) float4 hbuf[];      // 2 buffers x [T][2][160] float4
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
@@ -598,16 +599,16 @@ int down_chunk(bool staged, int* tile_out) {
             // every token of the batch in one launch.
             const int tv = 2560;
             tile[dev] = tv;
-            int want = (int) (kFusedGrMaxT * tv * sizeof(float));
+            int want = (int) (kFusedGrKernelT * tv * sizeof(float));
             if (optin > 0 && want > optin) want = optin;
             gr_opt_in(gr_down_multi_kernel<2560>, want, optin);
-            int want_staged = (int) (2 * kFusedGrMaxT * H_TILE * sizeof(float));
+            int want_staged = (int) (2 * kFusedGrKernelT * H_TILE * sizeof(float));
             if (optin > 0 && want_staged > optin) want_staged = optin;
             gr_opt_in(gr_down_staged_kernel<>, want_staged, optin);
-            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrMaxT, 2>, want_staged, optin);
-            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrMaxT, 3>, want_staged, optin);
-            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrMaxT, 4>, want_staged, optin);
-            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrMaxT, 5>, want_staged, optin);
+            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrKernelT, 2>, want_staged, optin);
+            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrKernelT, 3>, want_staged, optin);
+            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrKernelT, 4>, want_staged, optin);
+            gr_opt_in(gr_down_staged_deep_kernel<kFusedGrKernelT, 5>, want_staged, optin);
             gr_opt_in(gr_down_staged_kernel<6>, want_staged, optin);
             gr_opt_in(gr_down_staged_deep_kernel<6, 2>, want_staged, optin);
             gr_opt_in(gr_down_staged_deep_kernel<6, 3>, want_staged, optin);
@@ -618,9 +619,9 @@ int down_chunk(bool staged, int* tile_out) {
             cudaDeviceGetAttribute(&per_block, cudaDevAttrMaxSharedMemoryPerBlock, dev);
             const int usable = optin > 0 ? optin : per_block;
             const int capacity = usable / (int) (tv * sizeof(float));
-            chunk[dev] = capacity < 1 ? 1 : (capacity > kFusedGrMaxT ? kFusedGrMaxT : capacity);
+            chunk[dev] = capacity < 1 ? 1 : (capacity > kFusedGrKernelT ? kFusedGrKernelT : capacity);
             const int capacity_staged = usable / (int) (2 * H_TILE * sizeof(float));
-            chunk_staged[dev] = capacity_staged < 1 ? 1 : (capacity_staged > kFusedGrMaxT ? kFusedGrMaxT : capacity_staged);
+            chunk_staged[dev] = capacity_staged < 1 ? 1 : (capacity_staged > kFusedGrKernelT ? kFusedGrKernelT : capacity_staged);
             attr[dev].store(true, std::memory_order_release);
         }
     }
@@ -652,7 +653,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         const size_t smem = (size_t) ct * per_tok;
         const dim3 dg(DOWN_BLOCKS + 1), db(THREADS);
         if (staged) {
-            launch_staged<kFusedGrMaxT>(3, c, dg, smem, st);   // three weight tiles in flight per warp
+            launch_staged<kFusedGrKernelT>(3, c, dg, smem, st);   // three weight tiles in flight per warp
         } else {
             launch_pdl(gr_down_multi_kernel<2560>, dg, db, smem, st, c);
         }
@@ -676,6 +677,17 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
         basalt::log::error("basalt", "fused_gr_read_multi: invalid arguments");
         std::exit(1);
+    }
+    if (n_tok > kFusedGrKernelT) {
+        // A wider window runs as passes of kFusedGrKernelT tokens.  Every token's outputs are independent of the other
+        // tokens and of the width (the kernels' per-token arithmetic and reduction order never depend on T), so
+        // token t gets the bits it gets in any pass; the first pass IS the 8-token launch.  The xn scratch is
+        // [token][hc * n_embd], so a pass's scratch is the same buffer offset by its first token.
+        for (int c0 = 0; c0 < n_tok; c0 += kFusedGrKernelT) {
+            const int ct = std::min(kFusedGrKernelT, n_tok - c0);
+            fused_gr_read_multi(a + c0, ct, xn_scratch + (size_t) c0 * D, stream, c0 == 0 ? stamp_buf : nullptr, stamp_i0);
+        }
+        return;
     }
     GrMulti m;
     for (int t = 0; t < n_tok; ++t) {
@@ -731,7 +743,7 @@ namespace {
 /// bit for bit (and the plain read's with the single-token read's).  `why[v]` gets the first difference of variant
 /// v; false if the check itself could not run.
 bool fused_gr_selftest(bool ok_variant[4], std::string why[4]) {
-    constexpr int TM = kFusedGrMaxT;
+    constexpr int TM = kFusedGrKernelT;
     constexpr int NV = 4;                             // sets: 0 = plain, 1 = split, 2 = staged, 3 = single-token
     std::mt19937 rng(20260930u);
     std::normal_distribution<float> nd(0.0f, 1.0f);

@@ -16,6 +16,8 @@
 #include "basalt/kernels/native_mmvq.hpp"
 #include "basalt/kernels/pdl.hpp"
 #include "basalt/kernels/ngram.hpp"
+#include "basalt/kernels/verify_kernels.hpp"
+#include "basalt/kernels/cpu/expert.hpp"
 #include "basalt/kernels/qsa.hpp"
 #include "basalt/kernels/qsa_decode_attn.hpp"
 #include "basalt/kernels/q6k_head.hpp"
@@ -127,8 +129,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     max_t_ = max_t;
     sampling_.greedy = true;      // a fresh verifier samples greedily until set_sampling says otherwise
     sampling_.temperature = 0.0f;
-    if (max_t < 2 || max_t > basalt::kernels::kVerifyMaxT || max_t > basalt::kernels::cpu::MAXT) {
-        err = "verify: the window must hold 2.." + std::to_string(basalt::kernels::kVerifyMaxT) + " tokens";
+    static_assert(basalt::kernels::cpu::kWinT >= basalt::kernels::kVerifyMaxT, "the CPU expert pool's window tables hold a verify window");
+    if (max_t < 2 || max_t > basalt::kernels::verify_max_rows()) {
+        err = "verify: the window must hold 2.." + std::to_string(basalt::kernels::verify_max_rows()) + " tokens (--verify-max-rows)";
         return false;
     }
     if (hits.d_res == nullptr || hits.cache_base == nullptr || hits.blob <= 0) {

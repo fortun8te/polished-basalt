@@ -251,6 +251,9 @@ struct Options {
     /// it there instead of the MTP's drafts, where the MTP's own first guess agrees and the draft policy expects it to
     /// pay (basalt/spec/draft_policy.hpp).  On by default; 0 = MTP only.
     int suffix_draft = 3;
+    /// The verify window's row cap, 2..12 (default 12).  8 restores the 8-row engine: windows, kernels and reduction
+    /// orders are then exactly those before the 12-row work.  Env BASALT_VERIFY_MAX_ROWS sets the default.
+    int verify_max_rows = 12;
     /// The MTP's own window cap (0 = --spec): with --spec 6 --mtp-max-t 4 the long windows come from suffix matches.
     int mtp_max_t = 0;
     /// A control vector on the residual stream (basalt/kernels/cvec.hpp), with llama.cpp's flags: the

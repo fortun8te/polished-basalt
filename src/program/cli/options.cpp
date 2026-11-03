@@ -4,11 +4,13 @@
 #include "basalt/core/model_file.hpp"
 #include "basalt/kernels/rope_scaling.hpp"
 #include "basalt/kernels/sampler.hpp"
+#include "basalt/kernels/verify_kernels.hpp"
 #include "basalt/log.hpp"
 #include "basalt/program/options.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace basalt::program::cli {
 
@@ -208,6 +210,18 @@ std::optional<int> validate_kv_streaming(const Options& o) {
 }
 
 bool normalize_speculation_options(Options& o) {
+    // the window cap: --verify-max-rows (default 12; the BASALT_VERIFY_MAX_ROWS env var sets the flag's default)
+    if (o.verify_max_rows == 12) {
+        const char* e = std::getenv("BASALT_VERIFY_MAX_ROWS");
+        if (e != nullptr && *e != '\0') o.verify_max_rows = std::atoi(e);
+    }
+    o.verify_max_rows = std::clamp(o.verify_max_rows, 2, basalt::kernels::kVerifyMaxT);
+    basalt::kernels::set_verify_max_rows(o.verify_max_rows);
+    if (o.spec > o.verify_max_rows) {
+        basalt::log::warn("basalt", "--spec %d: a verify window holds at most %d rows (--verify-max-rows); using %d", o.spec,
+                          o.verify_max_rows, o.verify_max_rows);
+        o.spec = o.verify_max_rows;
+    }
     // --serve with --spec 0 or 1: no speculation.  The drafter is not loaded, prompt lookup is off, and every step
     // is a one-token window through the verify path.
     const bool no_spec = o.serve && o.spec < 2;
@@ -221,7 +235,7 @@ bool normalize_speculation_options(Options& o) {
     // --suffix-draft 0 turns it off.
     if (o.suffix_draft > 0 && o.spec >= 2 && o.mtp_max_t == 0) {
         o.mtp_max_t = o.spec;
-        o.spec = std::min(o.spec + 2, 8);   // kVerifyMaxT
+        o.spec = std::min(o.spec + 2, o.verify_max_rows);   // the verifier width
     }
     return no_spec;
 }

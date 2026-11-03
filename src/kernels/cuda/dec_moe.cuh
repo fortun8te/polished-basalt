@@ -9,6 +9,11 @@ namespace basalt::kernels {
 namespace {
 
 constexpr int kDmThreads = 256;
+// The peer's GDN mixer split (MIX) keeps the 8-row recurrence: its shared state (RecSmemT) is unioned with the expert
+// rings' and the kernel is resident at 4 blocks an SM, so a 12-row RecSmemT would cut the co-residency its grid
+// barriers need.  The Verifier does not take the mixer split for a window of more than kDmMixT rows (gs_init).
+constexpr int kDmMixT = 8;
+static_assert(kDmMixT <= kDecMaxT, "the mixer window is within dec_gdn_rec's");
 
 __device__ __forceinline__ unsigned long long dm_clock() {
     unsigned long long t;
@@ -1516,14 +1521,14 @@ template<int TY>
 __device__ __forceinline__ void dm_mix_rows_t(const uint8_t* w, size_t rb, int rows, int n_in, const block_q8_1* x, int xs,
                                               int nt, float* out, int ld, int gw, int nw, int lane) {
     const int nbk = n_in / Fmt<TY>::qk;
-    int off[kDecMaxT];
+    int off[kDmMixT];
 #pragma unroll
-    for (int c = 0; c < kDecMaxT; ++c) off[c] = min(c, nt - 1) * xs;
+    for (int c = 0; c < kDmMixT; ++c) off[c] = min(c, nt - 1) * xs;
     for (int r = gw; r < rows; r += nw) {
-        float s[kDecMaxT];
-        row_dot_multi<TY, kDecMaxT>(w + (size_t) r * rb, x, off, nt, nbk, lane, s);
+        float s[kDmMixT];
+        row_dot_multi<TY, kDmMixT>(w + (size_t) r * rb, x, off, nt, nbk, lane, s);
 #pragma unroll
-        for (int c = 0; c < kDecMaxT; ++c)
+        for (int c = 0; c < kDmMixT; ++c)
             if (c < nt && lane == c) out[(size_t) c * ld + r] = s[c];
     }
 }
@@ -1547,16 +1552,16 @@ __device__ __forceinline__ void dm_mix_rows_m_t(const uint8_t* w, size_t rb, int
                                                 int xs, int nt, float* out, int ld, float (*sp)[kDmThreads / 32]) {
     constexpr int WB = kDmThreads / 32;
     const int nbk = n_in / Fmt<TY>::qk, lane = threadIdx.x & 31, wi = threadIdx.x / 32;
-    int off[kDecMaxT];
+    int off[kDmMixT];
 #pragma unroll
-    for (int c = 0; c < kDecMaxT; ++c) off[c] = min(c, nt - 1) * xs;
+    for (int c = 0; c < kDmMixT; ++c) off[c] = min(c, nt - 1) * xs;
     for (int r0 = blockIdx.x * WB; r0 < rows; r0 += gridDim.x * WB) {
         const int r = r0 + wi;
         if (r < rows) {
-            float s[kDecMaxT];
-            row_dot_multi<TY, kDecMaxT>(w + (size_t) r * rb, x, off, nt, nbk, lane, s);
+            float s[kDmMixT];
+            row_dot_multi<TY, kDmMixT>(w + (size_t) r * rb, x, off, nt, nbk, lane, s);
 #pragma unroll
-            for (int c = 0; c < kDecMaxT; ++c)
+            for (int c = 0; c < kDmMixT; ++c)
                 if (c < nt && lane == c) sp[c][wi] = s[c];
         }
         __syncthreads();
@@ -1581,8 +1586,9 @@ __device__ __forceinline__ void dm_mix_rows_m(int type, const void* w, int rows,
 // The peer's shared memory: the expert rings' or the mixer recurrence's (never both at once in a block).
 union DmPeerShared {
     DmShared d;
-    RecSmem r;
+    RecSmemT<kDmMixT> r;
 };
+static_assert(sizeof(DmPeerShared) <= 40 * 1024, "dm_peer_kernel's static shared memory (with s_seq, s_ok, s_part)");
 
 // The peer window.  Per ring: block 0 waits for CUDA0's doorbell and copies the ring's header and q8_1 rows to the
 // device (only block 0 reads host memory); a grid barrier; every block groups the peer's entries (the same lists) and
@@ -1597,7 +1603,7 @@ __global__ void __launch_bounds__(kDmThreads, 4) dm_peer_kernel(DmPeerArgs a) {
     DmShared& sm = su.d;
     __shared__ uint32_t s_seq;
     __shared__ int32_t s_ok;
-    __shared__ float s_part[MIX ? kDecMaxT : 1][kDmThreads / 32];
+    __shared__ float s_part[MIX ? kDmMixT : 1][kDmThreads / 32];
     const int tid = threadIdx.x;
     const int nb = gridDim.x;
     float* gate = (float*) a.scratch;
@@ -1680,7 +1686,7 @@ __global__ void __launch_bounds__(kDmThreads, 4) dm_peer_kernel(DmPeerArgs a) {
                 if (tid < 128)   // one 128-thread item per (value head, rank), grid-strided
                     for (int it = blockIdx.x; it < 4 * R.h_v; it += nb) {
                         if (it != (int) blockIdx.x) rec_sync<true>();
-                        rec_block<kDecMaxT, true, true>(R, mt, it >> 2, it & 3, su.r, nullptr);
+                        rec_block<kDmMixT, true, true>(R, mt, it >> 2, it & 3, su.r, nullptr);
                     }
                 if (!dm_grid_sync(w, bar, ++bars * (unsigned int) nb, &s_ok)) return;
                 stamp(a.steps + s, 2);

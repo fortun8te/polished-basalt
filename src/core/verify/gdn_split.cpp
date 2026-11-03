@@ -58,6 +58,7 @@ static int gs_plan(const ModelGeometry& g, int dev0, int dev1) { return g_gs_off
 bool Verifier::gs_decide(const WeightTable& wt, const ModelGeometry& g, int dev0, int dev1, int max_t,
                          int64_t displaced) {
     g_gs_off = false;
+    if (max_t > basalt::kernels::kVerifyBaseT) return false;   // the peer's mixer keeps the 8-row recurrence (gs_init)
     if (dev1 < 0 || dev1 == dev0) return false;
     const int nk0 = gs_plan_bw(g, dev0, dev1);
     if (nk0 == 0) return false;
@@ -138,6 +139,12 @@ int64_t Verifier::gs_peer_bytes(const WeightTable& wt, const ModelGeometry& g, i
 void Verifier::gs_init() {
     using basalt::core::GdnHeadSlice;
     if (dm_ == nullptr || dm_->pdev < 0 || wt_ == nullptr) return;
+    // the peer's mixer keeps the 8-row recurrence (kDmMixT, dec_moe.cuh): a verifier sized for wider windows runs the mixer whole on CUDA0
+    if (max_t_ > basalt::kernels::kVerifyBaseT) {
+        basalt::log::info("basalt verify", "the GDN mixer stays whole on CUDA0: the window holds %d rows (the split takes up to %d; --verify-max-rows 8)",
+                          max_t_, basalt::kernels::kVerifyBaseT);
+        return;
+    }
     const ModelGeometry& g = *g_;
     const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, S = (int) g.ssm_state_size, HIST = (int) g.ssm_d_conv - 1;
     const int64_t N = g.n_embd, C = g.ssm_conv_channels, ZV = g.ssm_value_dim;
