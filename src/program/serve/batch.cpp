@@ -25,6 +25,38 @@ uint64_t Runtime::row_hash(int t) {
     return h;
 }
 
+// The routing feedback of one slot: only idle state, and the checkpoints on its retained token/image branch.
+void Runtime::report_cache(int slot, bool cached, const std::vector<int32_t>& held, const std::vector<ImgKey>& images,
+                           const std::vector<ConvCheckpoint>& saved) {
+    cached = cached && o.prompt_cache > 0;
+    std::printf("SCACHE %d %zu", slot, cached ? held.size() : size_t(0));
+    // Shared system-prefix checkpoints are reusable, but do not establish conversation affinity.
+    size_t shared = 0;
+    std::string role;
+    if (cached && o.turn_token >= 0 && !held.empty() && held[0] == o.turn_token) {
+        if (text_tokenizer.loaded())
+            for (size_t i = 1; i < held.size() && role.size() < 7; ++i) {
+                const int32_t id = held[i];
+                if (id < 0 || (size_t) id >= text_tokenizer.vocab_size()) break;
+                role += text_tokenizer.token_bytes(id);
+            }
+        // Without role bytes, do not guess whether this is a shared system prefix.
+        if (!text_tokenizer.loaded()) shared = held.size();
+    }
+    if (role.starts_with("system\n")) {
+        shared = held.size();
+        for (size_t i = 1; i < held.size(); ++i)
+            if (held[i] == o.turn_token) { shared = i; break; }
+    }
+    if (cached)
+        for (const ConvCheckpoint& c : saved)
+            if (c.ids.size() > shared && c.ids.size() <= held.size() &&
+                basalt::core::conversation_ids_equal(c.ids.data(), c.ids.size(), held.data()) &&
+                c.imgs == imgs_below(images, (int64_t) c.ids.size()))
+                std::printf(" %zu", c.ids.size());
+    std::printf("\n");
+}
+
 // one batch window over the active slots only (row t is the t-th active slot): an idle slot is not touched,
 // so it keeps the conversation it holds
 bool Runtime::batch_step() {
@@ -50,13 +82,14 @@ bool Runtime::batch_step() {
             if (!ke.empty() && kv_short) {   // the expert cache's floor: this slot's reply ends here
                 BSlot& sl = bs[(size_t) b];
                 basalt::log::warn("basalt batch", "slot %d stopped at %lld cells: %s", b, (long long) at, ke.c_str());
-                std::printf("BDONE %d %lld length %.1f %lld %lld\n", b, (long long) sl.produced,
-                            std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count(),
-                            (long long) sl.drafts_accepted, (long long) sl.drafts_offered);
                 sl.active = false;
                 sl.cached = o.prompt_cache > 0;   // its sessions hold sl.ids
                 sl.idle_busy = busy_now();
                 sl.guard.reset();
+                report_cache(b, sl.cached, sl.ids, sl.imgs, sl.checks);
+                std::printf("BDONE %d %lld length %.1f %lld %lld\n", b, (long long) sl.produced,
+                            std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count(),
+                            (long long) sl.drafts_accepted, (long long) sl.drafts_offered);
                 kv_wait[(size_t) b] = 1;
                 continue;
             }
@@ -325,12 +358,7 @@ bool Runtime::batch_step() {
             std::printf("\n");
         }
         if (fin_of[sg] != nullptr) {
-            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-            std::printf("BDONE %d %lld %s %.1f %lld %lld\n", b, (long long) sl.produced, fin_of[sg], ms,
-                        (long long) sl.drafts_accepted, (long long) sl.drafts_offered);
-            sl.active = false;
-            sl.cached = o.prompt_cache > 0;   // its sessions hold sl.ids for the next turn
-            sl.idle_busy = busy_now();
+            sl.active = false;   // (cached, the routing report and BDONE follow the window's last commit)
             sl.guard.reset();
         } else {
             sl.x = outb[r0s[sg] + k - 1];
@@ -393,6 +421,19 @@ bool Runtime::batch_step() {
         }
         bt_commit += msd(c0, Clock::now());
     }
+    // a finished slot's terminal frame follows the commit that completed its sessions
+    for (int sg = 0; sg < S; ++sg) {
+        if (fin_of[sg] == nullptr) continue;
+        const int b = rows[sg];
+        BSlot& sl = bs[(size_t) b];
+        sl.cached = o.prompt_cache > 0;   // its sessions hold sl.ids for the next turn
+        sl.idle_busy = busy_now();
+        report_cache(b, sl.cached, sl.ids, sl.imgs, sl.checks);
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
+        std::printf("BDONE %d %lld %s %.1f %lld %lld\n", b, (long long) sl.produced, fin_of[sg], ms,
+                    (long long) sl.drafts_accepted, (long long) sl.drafts_offered);
+    }
+    std::fflush(stdout);
     basalt::core::progress().busy.store(was_busy);
     if (!batch_on() && bt_windows > 0) {
         const double w = (double) bt_windows, wall = msd(bt_start, Clock::now());

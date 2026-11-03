@@ -506,6 +506,12 @@ private:
     bool capture_admit(uint64_t need, uint64_t floor);
     bool park_current(size_t held, int64_t kept);
     std::vector<ImgKey> imgs_below(const std::vector<ImgKey>& all, int64_t L);
+    /// `SCACHE <slot> <live length> [<checkpoint length> ...]`, printed before the request's terminal frame: the
+    /// length of the slot's retained token run and the conversation checkpoints on that run.  A slot that retains
+    /// nothing (or whose state is not vouched for) reports length 0.  Trailing numbers only: a server that does not
+    /// know the frame ignores it, and one that reads it without the checkpoints still has the live length.
+    void report_cache(int slot, bool cached, const std::vector<int32_t>& held, const std::vector<ImgKey>& images,
+                      const std::vector<ConvCheckpoint>& saved);
     bool gpu_sync_ok();
     bool checkpoint_at(int64_t L, std::vector<ConvCheckpoint>* parts = nullptr, bool defer = false,
                        ConvCheckpoint::Source source = ConvCheckpoint::kPeriodic);
