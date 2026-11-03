@@ -79,7 +79,7 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
     const bool qsaf_wide = fused_pre && (qb || n == 1) && v_.qs_[0] != nullptr;
     // the query projection's query rows first; its gate rows, which only the merge reads, beside the selection and the
     // attention chunks
-    const bool qhalf = qsaf_wide && !v_.batch_rec_ && N == 2560 &&
+    const bool qhalf = qsaf_wide && !v_.batch_rec_ && N == 2560 && n <= kQsaMidMaxCols &&
                        qsa_qproj_half_supported(wq->native_type, wq->native_data, (int) N, (int) (NH * 2 * HD));
     // the indexer appends gate the scores, the K/V appends the attention chunks: each on its own branch,
     // joined after the query post, which runs beside them

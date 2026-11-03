@@ -24,7 +24,7 @@ void note_fallback(const char* what, int a, int b) {
 void dense_proj(int bit, int type, const void* w, const void* xq, float* y, int n_in, int n_out, int n, void* s) {
     // the GDN output projection always takes the one-tile reduction order, the mid chain's, whatever the card's SM count
     if (bit == 4 && (kernels::dense_tc_mask() & bit) && kernels::dense_tc_type_on(type) &&
-        kernels::dense_tc_one_supported(type, n_in, w) && n_out > 0 && n >= 1 && n <= 8) {
+        kernels::dense_tc_one_supported(type, n_in, w) && n_out > 0 && n >= 1 && n <= kernels::kDenseTcMaxCols) {
         kernels::dense_tc_one(type, w, xq, y, n_in, n_out, n, s);
         return;
     }

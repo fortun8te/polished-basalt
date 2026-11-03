@@ -190,7 +190,7 @@ bool qsa_qproj_half_supported(int type, const void* w, int n_in, int n_out) {
 
 void qsa_qproj_half(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols, int half,
                     int blocks, void* stream) {
-    if (!qsa_qproj_half_supported(type, w, n_in, n_out) || ncols < 1 || ncols > kMaxCols || (half != 0 && half != 1) ||
+    if (!qsa_qproj_half_supported(type, w, n_in, n_out) || ncols < 1 || ncols > kQsaMidMaxCols || (half != 0 && half != 1) ||
         ((uintptr_t) x & 3) != 0) {
         basalt::log::error("basalt", "qsa_qproj_half: type %d n_in %d n_out %d ncols %d not supported", type, n_in, n_out,
                            ncols);

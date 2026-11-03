@@ -1034,13 +1034,9 @@ bool dense_tc_type_on(int t) noexcept {
     return (m & (t == 12 ? 1 : t == 13 ? 2 : t == 14 ? 4 : t == 23 ? 8 : t == 21 ? 16 : t == 11 ? 32 : t == 42 ? 64 : t == 8 ? 128 : 0)) != 0;
 }
 
-void dense_tc(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols, void* stream) {
-    if (!dense_tc_supported(type, n_in, n_out, w) || ncols < 1 || ncols > kMaxCols || n_out < 1 || ((uintptr_t) w & 3) != 0 ||
-        ((uintptr_t) x & 3) != 0) {
-        basalt::log::error("basalt", "dense_tc: type %d n_in %d n_out %d ncols %d not supported", type, n_in, n_out, ncols);
-        std::exit(1);
-    }
-    const auto s = (cudaStream_t) stream;
+// One launch: at most kMaxCols columns, the MMA's width.
+static void dense_tc_pass(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols,
+                          cudaStream_t s) {
     switch (type) {
         case 12: launch<12>(w, x, y, n_in, n_out, ncols, s); break;
         case 13: launch<13>(w, x, y, n_in, n_out, ncols, s); break;
@@ -1058,6 +1054,19 @@ void dense_tc(int type, const void* w, const void* x, float* y, int n_in, int n_
     }
 }
 
+void dense_tc(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols, void* stream) {
+    if (!dense_tc_supported(type, n_in, n_out, w) || ncols < 1 || ncols > kDenseTcMaxCols || n_out < 1 ||
+        ((uintptr_t) w & 3) != 0 || ((uintptr_t) x & 3) != 0) {
+        basalt::log::error("basalt", "dense_tc: type %d n_in %d n_out %d ncols %d not supported", type, n_in, n_out, ncols);
+        std::exit(1);
+    }
+    // Columns past the MMA's width take another pass over columns kMaxCols..: a column's sum depends on the shape alone
+    // (not on the other columns), so every column is bitwise what a pass of its own width gives.
+    for (int c0 = 0; c0 < ncols; c0 += kMaxCols)
+        dense_tc_pass(type, w, (const uint8_t*) x + (size_t) c0 * (n_in / 32) * kQ81, y + (size_t) c0 * n_out, n_in, n_out,
+                      std::min(kMaxCols, ncols - c0), (cudaStream_t) stream);
+}
+
 bool dense_tc_one_supported(int t, int n_in, const void* w) noexcept {
     if (!dense_tc_supported(t, n_in)) return false;
     switch (t) {
@@ -1072,12 +1081,8 @@ bool dense_tc_one_supported(int t, int n_in, const void* w) noexcept {
     }
 }
 
-void dense_tc_one(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols, void* stream) {
-    if (!dense_tc_one_supported(type, n_in, w) || ncols < 1 || ncols > kMaxCols || n_out < 1 || ((uintptr_t) x & 3) != 0) {
-        basalt::log::error("basalt", "dense_tc_one: type %d n_in %d n_out %d ncols %d not supported", type, n_in, n_out, ncols);
-        std::exit(1);
-    }
-    const auto s = (cudaStream_t) stream;
+static void dense_tc_one_pass(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols,
+                              cudaStream_t s) {
     switch (type) {
         case 12: launch_one<12, 24>(w, x, y, n_in, n_out, ncols, s); break;
         case 13: launch_one<13, 24>(w, x, y, n_in, n_out, ncols, s); break;
@@ -1095,21 +1100,40 @@ void dense_tc_one(int type, const void* w, const void* x, float* y, int n_in, in
     }
 }
 
+void dense_tc_one(int type, const void* w, const void* x, float* y, int n_in, int n_out, int ncols, void* stream) {
+    if (!dense_tc_one_supported(type, n_in, w) || ncols < 1 || ncols > kDenseTcMaxCols || n_out < 1 ||
+        ((uintptr_t) x & 3) != 0) {
+        basalt::log::error("basalt", "dense_tc_one: type %d n_in %d n_out %d ncols %d not supported", type, n_in, n_out, ncols);
+        std::exit(1);
+    }
+    for (int c0 = 0; c0 < ncols; c0 += kMaxCols)
+        dense_tc_one_pass(type, w, (const uint8_t*) x + (size_t) c0 * (n_in / 32) * kQ81, y + (size_t) c0 * n_out, n_in,
+                          n_out, std::min(kMaxCols, ncols - c0), (cudaStream_t) stream);
+}
+
 bool dense_tc_pair_supported(int t0, int t1, int n_in) noexcept {
     auto ok = [&](int t) { return t == 12 || t == 13 || t == 14 || t == 21 || t == 23 || t == 11 || t == 42 || t == 8; };
     if (!ok(t0) || !ok(t1) || n_in <= 0 || n_in % 512 != 0) return false;
     return pair_smem_bytes(t0, t1, n_in) <= 99 * 1024;
 }
 
+static void dense_tc_pair_pass(int t0, const void* w0, float* y0, int n_out0, int t1, const void* w1, float* y1,
+                               int n_out1, const void* x_q8_1, int n_in, int ncols, void* stream) {
+    pair_launch({(const uint8_t*) w0, y0, t0, n_out0}, {(const uint8_t*) w1, y1, t1, n_out1}, x_q8_1, n_in, ncols,
+                (cudaStream_t) stream);
+}
+
 void dense_tc_pair(int t0, const void* w0, float* y0, int n_out0, int t1, const void* w1, float* y1, int n_out1,
                    const void* x_q8_1, int n_in, int ncols, void* stream) {
-    if (!dense_tc_pair_supported(t0, t1, n_in) || ncols < 1 || ncols > kMaxCols || n_out0 < 1 || n_out1 < 1 ||
+    if (!dense_tc_pair_supported(t0, t1, n_in) || ncols < 1 || ncols > kDenseTcMaxCols || n_out0 < 1 || n_out1 < 1 ||
         ((uintptr_t) w0 & 15) != 0 || ((uintptr_t) w1 & 15) != 0 || ((uintptr_t) x_q8_1 & 3) != 0) {
         basalt::log::error("basalt", "dense_tc_pair: types %d/%d n_in %d not supported", t0, t1, n_in);
         std::exit(1);
     }
-    pair_launch({(const uint8_t*) w0, y0, t0, n_out0}, {(const uint8_t*) w1, y1, t1, n_out1}, x_q8_1, n_in, ncols,
-                (cudaStream_t) stream);
+    for (int c0 = 0; c0 < ncols; c0 += kMaxCols)
+        dense_tc_pair_pass(t0, w0, y0 + (size_t) c0 * n_out0, n_out0, t1, w1, y1 + (size_t) c0 * n_out1, n_out1,
+                           (const uint8_t*) x_q8_1 + (size_t) c0 * (n_in / 32) * kQ81, n_in,
+                           std::min(kMaxCols, ncols - c0), stream);
 }
 
 void dense_tc_l2_prefetch(const void* w, size_t bytes, void* stream) {

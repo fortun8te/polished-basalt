@@ -9,6 +9,9 @@
 
 namespace basalt::kernels {
 
+/// The most columns qsa_qproj_half takes (one MMA width); wider windows project the whole matrix with dense_tc.
+inline constexpr int kQsaMidMaxCols = 8;
+
 /// dense_tc takes this projection (its bit in dense_tc_mask, the type, the shape) as whole 16-row tiles, the layout
 /// the halves reproduce; n_out a multiple of 512; and the device has the SMs to run the gate half beside the attention.
 bool qsa_qproj_half_supported(int ggml_type, const void* weights, int n_in, int n_out);

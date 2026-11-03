@@ -1,7 +1,7 @@
 // include/basalt/kernels/dense_tc.hpp - dense projections of a verify window on int8 tensor cores.
 //
 // y[c][r] = sum over the row's 32-value blocks of the format's float term on the block's exact integer dot with
-// column c's q8_1 codes (mma.sync, 16 rows x 8 columns per tile).  Terms per block:
+// column c's q8_1 codes (mma.sync, 16 rows x 8 columns per tile; columns past 8 take another pass).  Terms per block:
 //   Q4_K / Q5_K   d8 * (d * sc * dot - dmin * m * sum)      (sum: the block's q8_1 code sum)
 //   Q6_K          d * d8 * (sc0 * dot0 + sc1 * dot1)        (the two 16-value halves)
 //   IQ4_XS        d * d8 * (ls - 32) * dot
@@ -14,13 +14,16 @@
 // it sits.  The pair stage rounds a partial last tile's bulk copy up to 16 bytes: up to 15 bytes past the matrix's
 // last row are read, and weight allocations carry that slack.
 //
-// Weights are the GGUF row-major blocks; x_q8_1 holds ncols (1..8) columns of n_in / 32 q8_1 blocks.  n_in must be a
+// Weights are the GGUF row-major blocks; x_q8_1 holds ncols (1..kDenseTcMaxCols) columns of n_in / 32 q8_1 blocks.  n_in must be a
 // multiple of 512, x_q8_1 16-byte aligned.  Needs thread-block clusters.
 #pragma once
 
 #include <cstddef>
 
 namespace basalt::kernels {
+
+/// The most columns one call takes: passes of 8, the last one narrower.
+inline constexpr int kDenseTcMaxCols = 16;
 
 bool dense_tc_supported(int ggml_type, int n_in) noexcept;
 /// The same for this call's shape and weights: IQ3_S only where each 16-row tile takes a block
