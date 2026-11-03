@@ -840,6 +840,7 @@ class OutputParser:
         return bool(self.fence) or (self.ticks + self.line.count("`")) % 2 == 1
 
     def _reset_scan(self):
+        self._call_end_checked = 0   # how much of the call body the closing-tag search has covered; -1: walk always
         self.sp = 0                  # consumed part of self.buf (the call body)
         self.ss = "name"             # name -> between -> str|raw -> ... -> done
         self.scall = None            # the ToolCall being streamed
@@ -848,6 +849,19 @@ class OutputParser:
         self.sdeclared = {}
         self.spname = ""
         self.svstart = 0
+
+    def _wrapped_call_end(self, final: bool = False) -> int:
+        """call_end(self.buf), without the structural walk while no `</tool_call>` can be there: every position
+        call_end returns is at a `</tool_call>`, so until one is in the buffer the answer is -1. Only the text added
+        since the last search (plus the overlap for a tag split across feeds) is searched; once a candidate appears
+        (it may be a literal inside a value) every later feed walks the body as before."""
+        if self._call_end_checked >= 0:
+            start = max(0, self._call_end_checked - len(CALL_END) + 1)
+            if self.buf.find(CALL_END, start) < 0:
+                self._call_end_checked = len(self.buf)
+                return -1
+            self._call_end_checked = -1
+        return call_end(self.buf, final=final)
 
     def _scan(self, final: bool = False) -> list[Event]:
         """Advance the streaming view of the call body."""
@@ -1025,7 +1039,7 @@ class OutputParser:
                 self.buf = self.buf[i + len(CALL_START):]
                 self.state = "call"
             else:
-                i = call_end(self.buf, final=final)
+                i = self._wrapped_call_end(final)
                 if self.stream_tools and i < 0:
                     out += self._scan(final=final)
                 if i < 0:
