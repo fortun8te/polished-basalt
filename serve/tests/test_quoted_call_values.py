@@ -1,5 +1,4 @@
-"""String arguments preserve quoted calls and heredocs (a repeated parameter name is still refused, see
-test_hardening_tools)."""
+"""String arguments preserve quoted calls, heredocs and repeated parameter markers."""
 import json
 import unittest
 
@@ -12,6 +11,7 @@ VALUES = {
     "quoted call": f"example transcript:\n{QUOTED}\nafter block",
     "quoted call at the end": f"example transcript:\n{QUOTED}",
     "heredoc": f"python3 - <<'PY'\nprint('''{QUOTED}''')\nPY",
+    "repeated parameter": f"head part\n{PARAM_END}\n{PARAM_START}content>\ntail part",
     "unclosed opener in prose": f"A call starts with `{FUNC_START}NAME>` and its parameters follow.",
     "unclosed opener in code": f'opener = "{FUNC_START}"\n',
     "unclosed function with parameter": f"example:\n{FUNC_START}foo>\n{PARAM_START}x>\nunfinished",
@@ -55,7 +55,7 @@ class QuotedCallValues(unittest.TestCase):
         first, second = call_text(value), call_text("two")
         for tail in ("\nafter the call", "\nnow the second:\n" + second):
             text = first + tail
-            for stream, tools in ((False, [SCHEMA]), (True, [SCHEMA])):
+            for stream, tools in ((False, [SCHEMA]), (True, [SCHEMA]), (True, None)):
                 for size in (1, 7, len(text)):
                     with self.subTest(tail=tail, stream=stream, tools=tools, size=size):
                         parser = OutputParser(thinking=False, tools=tools, stream_tools=stream)

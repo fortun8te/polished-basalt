@@ -200,8 +200,7 @@ public:
     /// discarded - a prompt read through windows commits every token - so they cost no sampler launch or sync and
     /// never read a history staged for another position.
     void set_head_sampling(bool on) { head_sampling_ = on; if (next_) next_->set_head_sampling(on); }
-    /// The next window's rows below `t` have their picks discarded (the prompt rows a first window folds in): the
-    /// head leaves those rows' logits approximate, and with head sampling off every row's.  One window only.
+    /// Skip exact head scoring below this row for the next window.
     void set_head_from(int t) { head_from_ = t; if (next_) next_->set_head_from(t); }
     /// On: a sampled window also leaves draft_prob(t), the probability row t's final distribution gives the window's
     /// token t + 1 (t < T - 1), for relaxed acceptance.  The picks are unchanged.  Off by default; set per request.
@@ -254,8 +253,6 @@ public:
     /// Keep the first `n_keep` (1..T) tokens of the last window; advances `ss.ple_prev` by them.  `parts`: 1 launches
     /// the commit graph, 2 advances `ss.ple_prev` (3: both, in that order).
     bool commit(int n_keep, std::string& err, int parts = 3);
-    /// The decode loop's host work off the GPU's critical path (see run() and the serve loop)
-    static bool chain_on();
     /// the residency tables uploaded now (between windows) rather than at the next run()
     bool dm_presync(std::string& err) { return dm_ == nullptr || dm_sync(err); }
     /// Work queued on `s` after this call starts only once the window stream has run everything queued on it so far (the
@@ -438,6 +435,8 @@ private:
     /// After a two-stage window: the head again over its columns, every row exact (the plain kernel's bits).
     bool head_exact_again() const;
     bool window_intact(std::string& err);   // after a window's sync: false when a bounded device wait of it timed out
+    void ar_handoff();                      // the zero-doorbell window's one hand-off (its rows are staged)
+    bool ar_plan_intact(std::string& err);  // after a zero-doorbell window: false when its plan met an expert out of VRAM
     /// One step of the host's service of the window's rings: 1 = every ring served, 0 = the GPU has not reached the next
     /// one, -1 = an error.
     int serve_poll(PoolMultiFn pool, void* user, std::string& err);
@@ -523,6 +522,8 @@ private:
     }();   ///< greedy by default; per-request via set_sampling
     const int32_t* hist_d_ = nullptr;   // penalty-history row (set_history); null = no penalties apply
     int hist_len_ = 0;
+    int head_from_ = 0;
+    int32_t* h_head_from_ = nullptr; int32_t* m_head_from_ = nullptr;
     bool head_sampling_ = true;          ///< set_head_sampling
     int head_from_ = 0;                  ///< set_head_from, for the next window
     int32_t* h_head_from_ = nullptr; int32_t* m_head_from_ = nullptr;   ///< the window's first row the head scores exactly
@@ -537,6 +538,7 @@ private:
     /// the stage is in VRAM.  A prompt loan, a VRAM shrink or an adaptive swap marks some -1: the windows then run the
     /// doorbell graph (exec_nr_ / the batch key's top bit).  refresh_ar() reads the host table before each window.
     bool ar_off_ = false;
+    bool ar_forced_ = false;   ///< --force-zero-doorbell: all_resident_ whatever the residency table says
     bool ar_on() const { return all_resident_ && !ar_off_; }
     void refresh_ar();
     uint32_t* h_plan_err_ = nullptr; uint32_t* m_plan_err_ = nullptr;   // set by resident_plan on a -1 (zero-doorbell graph)
@@ -625,6 +627,7 @@ private:
     uint32_t* h_pend_ = nullptr; uint32_t* m_pend_ = nullptr;   // the epoch the commit's begin kernel last started
     uint32_t commit_epoch_ = 0;
     int fin_blocks_ = 0;
+    int mid_max_t_ = 4;
     // Lazy GDN layers (lazy_on): the commit graph and the finisher take only the first GDN layer; the later ones are
     // committed inside the next solo window, on lz_s_ from the previous layer's FFN read (that layer's own items and,
     // until the previous layer's combine has its CPU rows, later ones), joined before the layer's GDN kernels.  The
@@ -734,7 +737,8 @@ private:
     bool gs_live_ = false, gs_split_ = false;
     SessionState* gs_ss_ = nullptr;
     float *gs_h_full_ = nullptr, *gs_h_slice_ = nullptr;   // pinned staging for gs_move: CUDA0's whole layers, the slice
-    uint8_t* vhead_scratch_ = nullptr;   // the two-stage head's histogram and thresholds (q6k_vhead), histogram and row list (q80p_vhead)
+    uint8_t* vhead_scratch_ = nullptr;   // the two-stage head's histogram and row list (q6k_vhead, q80p_vhead)
+    int32_t* head_from_d_ = nullptr;
     int32_t* head_keep_d_ = nullptr;     // q80p_vhead's list length, read by the captured head (null: no such head)
     int head_keep_set_ = 0;              // the value last written to head_keep_d_ (the arena starts it at 0)
     mutable bool head_screened_ = false;   // the last window's head was two-stage: only its top rows are exact

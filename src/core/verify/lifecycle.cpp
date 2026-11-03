@@ -326,6 +326,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         int sms = 0;
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device_ >= 0 ? device_ : 0);
         fin_blocks_ = sms;
+        mid_max_t_ = sms < 160 ? basalt::kernels::kMidChainMaxT : 4;
     }
     if (!basalt::kernels::gdn_commit_lazy_none(commit_ctl_) ||
         cudaStreamCreateWithPriority(&lz_s_, cudaStreamNonBlocking, cs_prio) != cudaSuccess ||
@@ -365,7 +366,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                     }
                 }
             }
-            all_resident_ = all_ok;
+            ar_forced_ = diagnostics().zero_doorbell;
+            all_resident_ = all_ok || ar_forced_;
         }
     }
     device_plan_ = false;

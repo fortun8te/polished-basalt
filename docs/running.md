@@ -39,10 +39,10 @@ With `--max-context` above 32768 the KV cache is elastic (not with `--kv-residen
 fine): each session backs its first 32768 cells at startup (the K/V pools, the indexer's block keys, the RoPE tables
 and the draft layer's K/V alike), and the rest of that VRAM holds the expert cache's last slots until a request needs
 it. A request backs its prompt plus 16384 cells before the prompt is read (and 16384 more whenever decode runs past
-that) by taking those slots back; their experts become CPU misses read from their RAM copies. The next request that
-needs less gives the cells back and the cache refills the slots from RAM, so a short request decodes with the cache a
-32k context would have. With `--parallel` a slot whose share is above 4096 tokens backs 4096 cells at startup and grows
-by 4096. An idle conversation's KV stays until requests beside it have run 15 s, then moves to RAM (outside
+that) by taking those slots back; their experts become CPU misses (a long prompt's go to a peer card). The next request
+that needs less gives the cells back and the cache refills the slots from RAM, so a short request decodes with the cache
+a 32k context would have. With `--parallel` a slot whose share is above 4096 tokens backs 4096 cells at startup and
+grows by 4096. An idle conversation's KV stays until requests beside it have run 15 s, then moves to RAM (outside
 `--conversation-cache-mib`, above the RAM floors; else only to the disk tier holding it) when a request needs VRAM or
 the engine is idle; its next turn reads it back. The startup line and each move say `elastic KV: ...` (a move out:
 `slot N's idle conversation ...`). The cache never goes below the slots a prompt chunk needs: a request whose KV would
@@ -172,7 +172,8 @@ per slot, `gpus` with `util`, `power` and `temp` per card) and the fastest reque
 `--conversation-cache-disk-mib N` (an engine flag, also `"conversation-cache-disk-mib"` in the config's `engine`
 section) parks conversations on disk under the RAM cache, in at most N MiB. It is off at 0, the default. It writes to
 the folder `conversations` inside the model's cache folder (`~/.cache/basalt/<hash>/`, where the engine log is);
-`--conversation-cache-dir DIR` only names another folder, and does nothing on its own. When the tier is on the server
+`--conversation-cache-dir DIR` only names another folder, and does nothing on its own. On Linux the folders the engine
+creates for the tier and the files it writes there are its user's only (0700, 0600); on Windows they take the parent folder's access list. When the tier is on the server
 prints `[disk] conversations=DIR disk-mib=N` at start. A conversation of at least 8192 tokens that leaves its session
 (another one takes its slot), that the RAM cache evicts, or that the engine still holds when it ends (a stop, an idle
 unload) is written to DIR: one file for its tokens and running state, and shared files for its K/V cache (one per 4096
@@ -233,7 +234,7 @@ Basalt refuses settings that would leave the machine without memory, and never s
   sits 1 GiB above the guard's). A running request continues; it stops with an error only when the RAM is critical:
   under 1 GiB free, or below the guard while the kernel's memory pressure (`/proc/pressure/memory`, avg10) shows tasks
   stalled most of the time (some >= 60% or full >= 40%). Without a pressure reading (Windows, or a kernel without PSI)
-  below the guard is critical. The error (`RAM low (... free < ... guard) ...: request stopped` or `RAM critical (...
+  RAM that stays below the guard for 10 s is critical; a shorter dip is not. The error (`RAM low (... free < ... guard) ...: request stopped` or `RAM critical (...
   free < ... hard floor): request stopped`, also returned to the client) names `--resident-budget-gib` only when the
   engine's own growth took the RAM, otherwise how much other programs took. While the model sleeps the guard judges no
   reading (the driver holds the GPU state in RAM until the wake); the wake takes a fresh one. Windows does not count the

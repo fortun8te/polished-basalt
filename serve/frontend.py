@@ -594,10 +594,8 @@ FUNC_START = "<function="
 _QUOTED_OPEN = re.compile(r"<function=[^<>\s]+>\s*(?:<parameter=|</function>)")
 
 
-def param_end(text: str, final: bool = False) -> int:
-    """Find a structural parameter close, keeping quoted calls inside the value: a `</parameter>` followed by
-    `<parameter=` or `</function>` counts when every `<function=NAME><parameter=` quoted earlier in the value has its
-    own `</function>`. (A repeated parameter name is not kept in the value: polished-next refuses a duplicate.)
+def param_end(text: str, final: bool = False, name: str | None = None) -> int:
+    """Find a structural parameter close, keeping quoted calls and a reopened parameter inside its value.
     -1: none yet; -2: candidate awaiting more output. `final` falls back to the plain structural close."""
     at = text.find(PARAM_END)
     fallback = -1
@@ -605,7 +603,11 @@ def param_end(text: str, final: bool = False) -> int:
         after = text[at + len(PARAM_END):].lstrip()
         candidate = -1
         if after.startswith(PARAM_START):
-            candidate = at
+            gt = after.find(">")
+            if gt < 0:
+                candidate = at if final else -2
+            elif name is None or after[len(PARAM_START):gt].strip() != name:
+                candidate = at
         elif after.startswith(FUNC_END):
             candidate = at
         elif not after or PARAM_START.startswith(after) or FUNC_END.startswith(after):
@@ -639,7 +641,7 @@ def call_end(text: str, final: bool = False) -> int:
             gt = text.find(">", pos)
             if gt < 0:
                 return -1
-            end = param_end(text[gt + 1:], final=final)
+            end = param_end(text[gt + 1:], final=final, name=text[pos:gt].split("=", 1)[1].strip())
             if end < 0:
                 return -1
             pos = gt + 1 + end + len(PARAM_END)
@@ -743,6 +745,70 @@ def _decode_param(value: str, schema) -> object:
         return value
 
 
+def _deref(root: dict, schema):
+    """Follows local $ref links ("#/a/b") to the schema they name; None if one does not resolve."""
+    for _ in range(32):
+        ref = schema.get("$ref") if isinstance(schema, dict) else None
+        if not isinstance(ref, str):
+            return schema
+        if not ref.startswith("#/"):
+            return None
+        cur = root
+        for part in ref[2:].split("/"):
+            if isinstance(cur, dict):
+                cur = cur.get(part)
+            elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
+                cur = cur[int(part)]
+            else:
+                return None
+        schema = cur
+    return schema
+
+
+def _union_variants(root: dict, schema, out: list, depth: int = 0) -> None:
+    """The object variants of a oneOf/anyOf union, nested unions flattened."""
+    schema = _deref(root, schema)
+    if not isinstance(schema, dict) or depth > 8:
+        return
+    unions = [schema[k] for k in ("oneOf", "anyOf") if isinstance(schema.get(k), list)]
+    for alts in unions:
+        for alt in alts:
+            _union_variants(root, alt, out, depth + 1)
+    if not unions and isinstance(schema.get("properties"), dict):
+        out.append(schema)
+
+
+def _tool_properties(tool: dict | None) -> dict:
+    """A tool's parameter schemas by name. Parameters sent as a union ({"properties": {}, "oneOf": [...]}) take the
+    properties of every variant, string enums united, as the tool-call grammar does."""
+    params = (tool or {}).get("parameters") or {}
+    props = params.get("properties") if isinstance(params, dict) else None
+    if props or not isinstance(params, dict):
+        return props or {}
+    variants = []
+    for k in ("oneOf", "anyOf"):
+        for alt in params.get(k) if isinstance(params.get(k), list) else []:
+            _union_variants(params, alt, variants)
+    merged = {}
+    for v in variants:
+        for name, prop in v["properties"].items():
+            value = _deref(params, prop)
+            value = value if value is not None else {}
+            cur = merged.get(name)
+            if cur is None:
+                merged[name] = value
+            elif cur == value:
+                continue
+            elif all(isinstance(s, dict) and isinstance(s.get("enum"), list)
+                     and all(isinstance(e, str) for e in s["enum"]) for s in (cur, value)):
+                merged[name] = dict(cur, enum=cur["enum"] + [e for e in value["enum"] if e not in cur["enum"]])
+            elif isinstance(cur, dict) and list(cur) == ["anyOf"]:
+                merged[name] = {"anyOf": cur["anyOf"] + ([value] if value not in cur["anyOf"] else [])}
+            else:
+                merged[name] = {"anyOf": [cur, value]}
+    return merged
+
+
 def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     """`<function=NAME>...</function>` -> ToolCall. Values are JSON-decoded when the schema says non-string
     (without a schema: when they parse as JSON objects, arrays, numbers or booleans)."""
@@ -753,7 +819,7 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     if not name or any(c in name for c in "<>\r\n"):
         raise ValueError("malformed tool call name")
     rest = body[body.index(">") + 1:]
-    props = ((schema or {}).get("parameters") or {}).get("properties") or {}
+    props = _tool_properties(schema)
     args = {}
     while True:
         rest = rest.lstrip()
@@ -766,11 +832,9 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
         if not pname or any(c in pname for c in "<>\r\n") or pname in args:
             raise ValueError("malformed or duplicate tool parameter")
         rest = rest[rest.index(">") + 1:]
-        end = param_end(rest, final=True)
-        if end < 0:
-            raise ValueError("unterminated tool parameter")
-        value = rest[:end]
-        rest = rest[end + len(PARAM_END):]
+        end = param_end(rest, final=True, name=pname.strip())
+        value = rest[:end] if end >= 0 else rest
+        rest = rest[end + len(PARAM_END):] if end >= 0 else ""
         if value.startswith("\n"):
             value = value[1:]
         if value.endswith("\n"):
@@ -850,19 +914,6 @@ class OutputParser:
         self.spname = ""
         self.svstart = 0
 
-    def _wrapped_call_end(self, final: bool = False) -> int:
-        """call_end(self.buf), without the structural walk while no `</tool_call>` can be there: every position
-        call_end returns is at a `</tool_call>`, so until one is in the buffer the answer is -1. Only the text added
-        since the last search (plus the overlap for a tag split across feeds) is searched; once a candidate appears
-        (it may be a literal inside a value) every later feed walks the body as before."""
-        if self._call_end_checked >= 0:
-            start = max(0, self._call_end_checked - len(CALL_END) + 1)
-            if self.buf.find(CALL_END, start) < 0:
-                self._call_end_checked = len(self.buf)
-                return -1
-            self._call_end_checked = -1
-        return call_end(self.buf, final=final)
-
     def _scan(self, final: bool = False) -> list[Event]:
         """Advance the streaming view of the call body."""
         out = []
@@ -883,8 +934,7 @@ class OutputParser:
                 if name is None:
                     return out
                 self.scall = ToolCall(name=name, arguments={})
-                props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
-                self.sdeclared = props
+                self.sdeclared = _tool_properties(self.schemas.get(name))
                 out.append(Event("tool_start", call=self.scall))
                 args("{")
                 self.sp += b + 1
@@ -921,8 +971,7 @@ class OutputParser:
                         rest = rest[1:]
                     self.sval_started = True
                     self.svstart = self.sp
-                # the value's own text from its start: quoted openers before the close are counted
-                end = param_end(self.buf[self.svstart:], final=final) if PARAM_END in rest else -1
+                end = param_end(self.buf[self.svstart:], final=final, name=self.spname) if PARAM_END in rest else -1
                 end = end - (self.sp - self.svstart) if end >= 0 else end
                 if end >= 0:
                     value = rest[:end]
@@ -941,7 +990,7 @@ class OutputParser:
                     self.sp += safe
                 return out
             elif self.ss == "raw":
-                end = param_end(rest, final=final)
+                end = param_end(rest, final=final, name=self.spname)
                 if end < 0:
                     return out
                 value = rest[:end]
@@ -1039,9 +1088,15 @@ class OutputParser:
                 self.buf = self.buf[i + len(CALL_START):]
                 self.state = "call"
             else:
-                i = self._wrapped_call_end(final)
-                if self.stream_tools and i < 0:
-                    out += self._scan(final=final)
+                i = call_end(self.buf, final=final)
+                if self.stream_tools:
+                    if i >= 0:
+                        whole, self.buf = self.buf, self.buf[:i]     # scan only the body
+                        out += self._scan(final=final)
+                        out += self._close_scan()
+                        self.buf = whole
+                    else:
+                        out += self._scan(final=final)
                 if i < 0:
                     return out
                 body = self.buf[:i]
@@ -1073,8 +1128,10 @@ class OutputParser:
     def finish(self) -> list[Event]:
         """End of generation: flush what is held (an unterminated call becomes content; an announced one is left
         unfinished with no "tool_call")."""
-        out = self.feed("", final=True)         # a held quoted-call close is accepted as the plain close
+        out = self.feed("", final=True)
         if self.state == "call" and self.stream_tools and self.scall is not None:
+            if self.ss == "done":               # only </tool_call> is missing
+                out.append(Event("tool_call", call=self.scall))
             self.buf = ""
             self._reset_scan()
             return out
