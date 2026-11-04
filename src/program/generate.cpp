@@ -8,6 +8,11 @@
 
 #include "generate/run.hpp"
 
+#include "basalt/platform/process.hpp"
+
+#include <cstdio>
+
 int main(int argc, char** argv) {
+    basalt::platform::restore_normal_io_priority(stderr);   // a Scheduled Task start is Low disk / low memory priority
     return basalt::program::generate::run(argc, argv);
 }

@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -92,5 +93,15 @@ int spawn_and_wait(const std::vector<std::string>& argv);
 /// waited on, and this process ends with the child's exit code - which is what makes a wrapper's exit status mean
 /// what the child's did.
 int exec_replacing(const std::vector<std::string>& argv);
+
+/// Windows: a process starts with the I/O (disk) priority and the memory (page) priority of the program that started
+/// it. An engine started from a Scheduled Task inherits Low I/O priority (1) and memory priority 2, so its SSD reads
+/// (the PLE table's direct reads, a cold model read) queue behind normal work and its pages are the first the memory
+/// manager trims. This puts both back to Normal (I/O 2, memory 5) when they started lower and prints one line to
+/// `log` (none when null). Raising to Normal needs no privilege. BASALT_KEEP_IO_PRIORITY=1 leaves both as inherited.
+/// Returns the I/O priority found (2 when nothing changed; -1 when unread, kept by the variable, or on Linux). Same
+/// bits out of every kernel: only the OS's queueing of this process changes. Port of Strata b89bf594 (#4733), plus
+/// the memory priority.
+int restore_normal_io_priority(std::FILE* log);
 
 }  // namespace basalt::platform

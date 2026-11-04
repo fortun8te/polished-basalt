@@ -318,4 +318,42 @@ int exec_replacing(const std::vector<std::string>& argv) {
 #endif
 }
 
+int restore_normal_io_priority(std::FILE* log) {
+#if defined(_WIN32)
+    const char* keep = std::getenv("BASALT_KEEP_IO_PRIORITY");
+    if (keep != nullptr && keep[0] == '1') return -1;
+    using Query = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    using Set = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    if (nt == nullptr) return -1;
+    auto query = reinterpret_cast<Query>(reinterpret_cast<void*>(GetProcAddress(nt, "NtQueryInformationProcess")));
+    auto set = reinterpret_cast<Set>(reinterpret_cast<void*>(GetProcAddress(nt, "NtSetInformationProcess")));
+    if (query == nullptr || set == nullptr) return -1;
+    constexpr ULONG kProcessIoPriority = 33, kProcessPagePriority = 39;
+    ULONG io = 2, page = 5, ret = 0;
+    const bool io_read = query(GetCurrentProcess(), kProcessIoPriority, &io, sizeof io, &ret) == 0 && ret >= sizeof io;
+    ret = 0;
+    const bool page_read = query(GetCurrentProcess(), kProcessPagePriority, &page, sizeof page, &ret) == 0 && ret >= sizeof page;
+    bool io_set = false, page_set = false, io_fail = false, page_fail = false;
+    if (io_read && io < 2) {
+        ULONG want = 2;
+        (set(GetCurrentProcess(), kProcessIoPriority, &want, sizeof want) == 0 ? io_set : io_fail) = true;
+    }
+    if (page_read && page < 5) {
+        ULONG want = 5;   // MEMORY_PRIORITY_NORMAL
+        (set(GetCurrentProcess(), kProcessPagePriority, &want, sizeof want) == 0 ? page_set : page_fail) = true;
+    }
+    if (log != nullptr && (io_set || page_set || io_fail || page_fail))
+        std::fprintf(log, "basalt: inherited disk priority %lu, memory priority %lu (from the program that started the engine); "
+                          "%s%s%s (BASALT_KEEP_IO_PRIORITY=1 keeps them)\n", io, page,
+                     io_set ? "disk priority now normal" : io_fail ? "disk priority could not be raised" : "disk priority kept",
+                     ", ", page_set ? "memory priority now normal" : page_fail ? "memory priority could not be raised"
+                                                                              : "memory priority kept");
+    return io_read ? (int) io : -1;
+#else
+    (void) log;
+    return -1;
+#endif
+}
+
 }  // namespace basalt::platform
